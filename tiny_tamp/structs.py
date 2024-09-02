@@ -221,6 +221,11 @@ class SimulatorInstance:
             self.robot, PANDA_GROUPS[group], client=self.client
         )
 
+    def get_group_positions(self, group):
+        return pbu.get_joint_positions(
+            self.robot, self.get_group_joints(group), client=self.client
+        )
+
     def set_group_positions(self, group, positions):
         pbu.set_joint_positions(
             self.robot, self.get_group_joints(group), positions, client=self.client
@@ -245,6 +250,19 @@ class SimulatorInstance:
         if self.real_robot:
             self.sender.execute_position_path(named_positions)
 
+    def execute_sequence(self, sequence):
+        for command in sequence:
+            if isinstance(command, Trajectory):
+                self.command_trajectory(command.path)
+            elif isinstance(command, ActivateGrasp):
+                self.close_gripper(command)
+            elif isinstance(command, DeactivateGrasp):
+                self.open_gripper(command)
+            elif isinstance(command, Sequence):
+                self.execute_sequence(command.commands)
+            else:
+                raise ValueError("Unknown command type: {}".format(command))
+
 
 @dataclass
 class Command:
@@ -260,16 +278,16 @@ class Trajectory(Command):
     joints: List[int]
     path: List[List[float]]
     velocity_scale: float = 1.0
-    contact_links: List[int] = []
     time_after_contact: float = np.inf
+    attachments: List[Attachment] = field(default_factory=list)
 
     def reverse(self):
         return self.__class__(
             self.joints,
             self.path[::-1],
             velocity_scale=self.velocity_scale,
-            contact_links=self.contact_links,
             time_after_contact=self.time_after_contact,
+            attachments=self.attachments,
         )
 
     def __repr__(self):

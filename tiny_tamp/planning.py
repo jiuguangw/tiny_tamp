@@ -269,7 +269,7 @@ def plan_prehensile(
 def get_plan_pick_fn(sim: SimulatorInstance, environment: List[int] = [], debug=False):
     environment = environment
 
-    def fn(obj, pose: pbu.Pose, grasp: Grasp):
+    def fn(obj: int, pose: pbu.Pose, grasp: Grasp):
         arm_path = plan_prehensile(
             sim, obj, pose, grasp, environment=environment, debug=debug
         )
@@ -299,7 +299,7 @@ def get_plan_pick_fn(sim: SimulatorInstance, environment: List[int] = [], debug=
 def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
     environment = environment
 
-    def fn(obj, pose, grasp):
+    def fn(obj: int, pose: pbu.Pose, grasp: Grasp):
         arm_path = plan_prehensile(
             sim.robot, obj, pose, grasp, environment=environment, debug=debug
         )
@@ -351,35 +351,27 @@ def get_pick_place_plan(
     sim.set_belief(belief)
 
     body_saver = pbu.WorldSaver(client=sim.client)
-    obj_aabb = pbu.get_aabb(obj, client=sim.client)
-    obj_pose = pbu.get_pose(obj, client=sim.client)
 
     obstacles = sim.movable_objects + [sim.table]
 
-    pick_planner = get_plan_pick_fn(
-        sim,
-        environment=obstacles,
-        max_attempts=max_pick_attempts,
-        client=sim.client,
-    )
-    place_planner = get_plan_place_fn(
-        sim,
-        environment=obstacles,
-        max_attempts=max_place_attempts,
-        client=sim.client,
-    )
+    pick_planner = get_plan_pick_fn(sim, environment=obstacles)
+    place_planner = get_plan_place_fn(sim, environment=obstacles)
 
-    q1 = Conf(sim.get_group_joints(sim.arm_group), client=sim.client)
+    q1 = Conf(
+        sim.robot,
+        sim.get_group_joints(sim.arm_group),
+        sim.get_group_positions(sim.arm_group),
+    )
 
     for gi in range(max_grasp_attempts):
         print("[Planner] grasp attempt " + str(gi))
         body_saver.restore()
-        grasp: Grasp = grasp_sampler(obj, obj_aabb, obj_pose)
+        grasp: Grasp = grasp_sampler(obj)
 
         print("[Planner] finding pick plan for grasp " + str(grasp))
         for _ in range(max_pick_attempts):
             body_saver.restore()
-            pick = pick_planner(obj, obj_pose, grasp)
+            pick = pick_planner(obj, grasp)
             if pick is not None:
                 break
 

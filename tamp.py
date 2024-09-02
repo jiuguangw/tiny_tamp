@@ -12,14 +12,13 @@ import tiny_tamp.pb_utils as pbu
 from tiny_tamp.planning import get_pick_place_plan, get_plan_motion_fn
 from tiny_tamp.structs import (
     DEFAULT_JOINT_POSITIONS,
-    DEFAULT_TS,
     GRIPPER_GROUP,
     TABLE_POSE,
     GoalBelief,
     Grasp,
     ObjectState,
+    Sequence,
     SimulatorInstance,
-    SimulatorState,
     WorldBelief,
 )
 
@@ -134,9 +133,10 @@ def main():
         if (pos_error > 1e-2) or (ori_error > 1e-2):
             subplan, statistics = get_pick_place_plan(
                 sim_instance,
+                belief,
                 sim_instance.movable_objects[belief_object_index],
-                motion_planner,
                 grasp_sampler,
+                motion_planner,
             )
             if subplan is None:
                 print("Planning failure")
@@ -145,14 +145,8 @@ def main():
 
             plan_components.append(subplan)
 
-    sim_state = SimulatorState(sim_instance)
-
-    for sequence in plan_components:
-        for i, _ in enumerate(
-            sequence.iterate(sim_state, real_controller=args.real_robot)
-        ):
-            sim_state.propagate()
-            pbu.wait_for_duration(DEFAULT_TS)
+    plan_sequence = Sequence(plan_components, "rearrangement_plan")
+    sim_instance.execute_sequence(plan_sequence)
 
 
 if __name__ == "__main__":

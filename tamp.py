@@ -15,6 +15,7 @@ from tiny_tamp.structs import (
     DEFAULT_TS,
     GRIPPER_GROUP,
     TABLE_POSE,
+    GoalBelief,
     Grasp,
     ObjectState,
     SimulatorInstance,
@@ -67,7 +68,7 @@ def dummy_perception() -> WorldBelief:
     return WorldBelief(object_states=object_states, robot_state=DEFAULT_JOINT_POSITIONS)
 
 
-def dummy_get_goal(belief: WorldBelief) -> WorldBelief:
+def dummy_get_goal(belief: WorldBelief) -> GoalBelief:
     new_belief = copy.deepcopy(belief)
 
     # The goal is to shift the red and blue blocks a little
@@ -117,13 +118,23 @@ def main():
     grasp_sampler = get_grasp_gen_fn(twin_sim_instance, belief)
 
     plan_components = []
-    for object_idx in range(len(belief.object_states)):
+    for goal_object_state in goal_belief.object_states:
+
+        # Assuming all objects have unique categories
+        belief_object_index, belief_object = [
+            (obj_idx, obj)
+            for obj_idx, obj in enumerate(belief.object_states)
+            if obj.category == goal_object_state.category
+        ][0]
+
         pos_error, ori_error = pbu.get_pose_distance(
-            belief.object_states[object_idx].pose,
-            goal_belief.object_states[object_idx].pose,
+            belief_object.pose,
+            goal_object_state.pose,
         )
-        if (pos_error < 1e-2) and (ori_error < 1e-2):
+        if (pos_error > 1e-2) or (ori_error > 1e-2):
             subplan, statistics = get_pick_place_plan(
+                sim_instance,
+                sim_instance.movable_objects[belief_object_index],
                 motion_planner,
                 grasp_sampler,
             )

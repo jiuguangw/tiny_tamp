@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import itertools
+import time
 from abc import ABC
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
@@ -10,6 +12,7 @@ import pybullet as p
 import pybullet_utils.bullet_client as bc
 
 import tiny_tamp.pb_utils as pbu
+from tiny_tamp.hardware.panda_sender import PandaSender
 
 ARM_GROUP = "main_arm"
 GRIPPER_GROUP = "main_gripper"
@@ -60,6 +63,23 @@ class WorldBelief:
         ObjectState
     ]  # Mapping from id in pybullet client to object state
     robot_state: List[float]  # Current robot movable joint positions
+    gripper_open: bool = True
+
+
+@dataclass
+class GoalBelief(WorldBelief):
+    """A belief about the goal state of the world. This is used to specify the
+    desired object locations The semantics of this goal is a set of existential
+    quantifiers.
+
+    For each object in the belief with a particular category, the goal
+    is to believe that there exists an object with the same category at
+    the specified pose.
+
+    More complex goal semantics will require a more capable planner
+    """
+
+    pass
 
 
 @dataclass
@@ -67,12 +87,16 @@ class SimulatorInstance:
     client: int  # The pybullet phyiscs client
     robot: int  # The robot id in the pybullet client
     table: int  # The table id in the pybullet client
-    movable_objects: Dict[
-        int, ObjectState
-    ]  # Mapping from id in pybullet client to object state
+    movable_objects: List[int]  # Mapping from id in pybullet client to object state
     components: Dict[str, int] = field(
         default_factory=dict
     )  # Mapping from group name to component id
+
+    real_robot: int = False
+    sender: PandaSender = None
+
+    arm_group = "main_arm"
+    gripper_group = "main_gripper"
 
     @staticmethod
     def from_belief(belief: WorldBelief, gui=False):
@@ -93,27 +117,71 @@ class SimulatorInstance:
         pbu.set_pose(table, TABLE_POSE, client=client)
 
         # Add the objects to the scene
-        movable_objects = {}
+        movable_objects = []
         for obj_state in belief.object_states:
             obj = obj_state.create_object(client)
             pbu.set_pose(obj, obj_state.pose, client=client)
-            movable_objects[obj] = obj_state
+            movable_objects.append(obj)
 
-        return SimulatorInstance(client, robot_body, table, movable_objects)
+        instance = SimulatorInstance(client, robot_body, table, movable_objects)
 
-    def get_group_subtree(self, group, **kwargs):
-        return pbu.get_link_subtree(
-            self.body, self.get_group_parent(group, **kwargs), **kwargs
+        # Move robot to joint positions
+        if belief.gripper_open:
+            instance.open_gripper()
+        else:
+            instance.close_gripper()
+
+        instance.set_group_positions(instance.arm_group, belief.robot_state)
+
+        return instance
+
+    def set_belief(self, belief: WorldBelief):
+        assert len(belief.object_states) == len(self.movable_objects)
+
+        for obj_state in belief.object_states:
+            pbu.set_pose(
+                obj_state.create_object(self.client), obj_state.pose, client=self.client
+            )
+        self.set_group_positions(self.arm_group, belief.robot_state)
+        if belief.gripper_open:
+            self.open_gripper()
+        else:
+            self.close_gripper()
+
+    def get_group_parent(self, group):
+        return pbu.get_link_parent(
+            self.robot, self.get_group_joints(group)[0], client=self.client
         )
 
-    def get_component(self, group, visual=True, **kwargs):
+    def get_group_subtree(self, group):
+        return pbu.get_link_subtree(
+            self.robot, self.get_group_parent(group), client=self.client
+        )
+
+    def get_component_mapping(self, group):
+        assert group in self.components
+        component_joints = pbu.get_movable_joints(
+            self.components[group], draw=False, client=self.client
+        )
+        body_joints = pbu.get_movable_joint_descendants(
+            self.robot,
+            self.get_group_parent(group, client=self.client),
+            client=self.client,
+        )
+        return OrderedDict(pbu.safe_zip(body_joints, component_joints))
+
+    def get_component_joints(self, group):
+        mapping = self.get_component_mapping(group)
+        return list(map(mapping.get, self.get_group_joints(group)))
+
+    def get_component(self, group, visual=True):
         if group not in self.components:
             component = pbu.clone_body(
-                self.body,
-                links=self.get_group_subtree(group, **kwargs),
+                self.robot,
+                links=self.get_group_subtree(group),
                 visual=False,
                 collision=True,
-                **kwargs,
+                client=self.client,
             )
             if not visual:
                 pbu.set_all_color(component, pbu.TRANSPARENT)
@@ -124,387 +192,171 @@ class SimulatorInstance:
     def tool_link(self):
         pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
 
-    def get_group_joints(self, group, **kwargs):
-        return pbu.joints_from_names(self.robot, PANDA_GROUPS[group], **kwargs)
+    def get_group_joints(self, group):
+        return pbu.joints_from_names(
+            self.robot, PANDA_GROUPS[group], client=self.client
+        )
+
+    def get_group_limits(self, group, **kwargs):
+        return pbu.get_custom_limits(
+            self.robot, self.get_group_joints(group, **kwargs), client=self.client
+        )
+
+    def open_gripper(self):
+        _, open_conf = self.get_group_limits(GRIPPER_GROUP)
+        self.set_group_positions(GRIPPER_GROUP, open_conf)
+
+        if self.real_robot:
+            self.sender.open_gripper()
+
+    def close_gripper(self):
+        closed_conf, _ = self.get_group_limits(GRIPPER_GROUP)
+        self.set_group_positions(GRIPPER_GROUP, closed_conf)
+
+        if self.real_robot:
+            self.sender.close_gripper()
+
+    def get_group_joints(self, group):
+        return pbu.joints_from_names(
+            self.robot, PANDA_GROUPS[group], client=self.client
+        )
+
+    def set_group_positions(self, group, positions):
+        pbu.set_joint_positions(
+            self.robot, self.get_group_joints(group), positions, client=self.client
+        )
+
+        if self.real_robot:
+            self.sender.command_arm(positions)
+
+    def command_trajectory(self, trajectory, dt=0.01):
+
+        named_positions = []
+        for positions in trajectory:
+            self.set_group_positions(ARM_GROUP, positions)
+            named_positions.append(
+                {
+                    name: position
+                    for name, position in zip(PANDA_GROUPS[ARM_GROUP], positions)
+                }
+            )
+            time.sleep(dt)
+
+        if self.real_robot:
+            self.sender.execute_position_path(named_positions)
 
 
-class SimulatorState:
-    def __init__(self, instance, attachments={}):
-        self.attachments = attachments
-        self.instance = instance
-
-    def propagate(self, **kwargs):
-        for relative_pose in self.attachments.values():
-            relative_pose.assign(**kwargs)
-
-
-class Conf(object):
-    def __init__(self, robot, joints, positions):
-        self.robot = robot
-        self.joints = joints
-        self.positions = positions
-
-    @property
-    def values(self):
-        return self.positions
-
-    def assign(self):
-        pbu.set_joint_positions(self.body, self.joints, self.positions)
-
-    def iterate(self):
-        yield self
+@dataclass
+class Command:
+    """A command that can be executed in the environment."""
 
     def __repr__(self):
-        return "q{}".format(id(self) % 1000)
+        return self.__class__.__name__
 
 
-class GroupConf(Conf):
-    def __init__(self, body, group, *args, **kwargs):
-        joints = body.get_group_joints(group, **kwargs)
-        super(GroupConf, self).__init__(body, joints, *args, **kwargs)
-        self.group = group
-
-    def __repr__(self):
-        return "{}q{}".format(self.group[0], id(self) % 1000)
-
-
-class Command(ABC):
-
-    def iterate(self, state, **kwargs):
-        raise NotImplementedError()
-
-    def controller(self, *args, **kwargs):
-        raise NotImplementedError()
-
-    def execute(self, controller, *args, **kwargs):
-        return True
-
-
+@dataclass
 class Trajectory(Command):
-    def __init__(
-        self,
-        sim: SimulatorInstance,
-        joints,
-        path,
-        velocity_scale=1.0,
-        contact_links=[],
-        time_after_contact=np.inf,
-        contexts=[],
-        **kwargs,
-    ):
-        self.sim = sim
-        self.joints = joints
-        self.path = tuple(path)
-        self.velocity_scale = velocity_scale
-        self.contact_links = tuple(contact_links)
-        self.time_after_contact = time_after_contact
-        self.contexts = tuple(contexts)
-
-    @property
-    def context_bodies(self):
-        return {self.body} | {context.body for context in self.contexts}
-
-    def conf(self, positions):
-        return Conf(self.body, self.joints, positions=positions)
-
-    def first(self):
-        return self.conf(self.path[0])
-
-    def last(self):
-        return self.conf(self.path[-1])
+    robot: int
+    joints: List[int]
+    path: List[List[float]]
+    velocity_scale: float = 1.0
+    contact_links: List[int] = []
+    time_after_contact: float = np.inf
 
     def reverse(self):
         return self.__class__(
-            self.sim,
             self.joints,
             self.path[::-1],
             velocity_scale=self.velocity_scale,
             contact_links=self.contact_links,
             time_after_contact=self.time_after_contact,
-            contexts=self.contexts,
         )
-
-    def adjust_path(self, **kwargs):
-        current_positions = pbu.get_joint_positions(self.body, self.joints, **kwargs)
-        return pbu.adjust_path(
-            self.body, self.joints, [current_positions] + list(self.path), **kwargs
-        )
-
-    def compute_waypoints(self, **kwargs):
-        return pbu.waypoints_from_path(
-            pbu.adjust_path(self.body, self.joints, self.path, **kwargs)
-        )
-
-    def compute_curve(self, **kwargs):
-        path = self.adjust_path(**kwargs)
-        positions_curve = pbu.interpolate_path(self.body, self.joints, path, **kwargs)
-        return positions_curve
-
-    def iterate(self, state, teleport=False, **kwargs):
-        if teleport:
-            pbu.set_joint_positions(self.body, self.joints, self.path[-1], **kwargs)
-            return self.path[-1]
-        else:
-            return pbu.step_curve(
-                self.body, self.joints, self.compute_curve(**kwargs), **kwargs
-            )
 
     def __repr__(self):
         return "t{}".format(id(self) % 1000)
 
 
-class CaptureImage(Command):
-    def __init__(self, robot=None, captured_image=None, **kwargs):
-        self.robot = robot
-        self.captured_image = captured_image
+@dataclass
+class ActivateGrasp(Command):
+    """Create or remove a fixed joint between two bodies and open/close a
+    gripper."""
 
-    def iterate(self, state, **kwargs):
-        self.captured_image = self.robot.get_image()
-        return pbu.empty_sequence()
+    robot: int
+    gripper_link: int
+    body: int
+
+    def __repr__(self):
+        return "s{}".format(id(self) % 1000)
 
 
-class GroupTrajectory(Trajectory):
-    def __init__(self, sim: SimulatorInstance, group: str, path, *args, **kwargs):
-        self.sim = sim
-        joints = self.sim.get_group_joints(group, **kwargs)
-        super(GroupTrajectory, self).__init__(self.sim, joints, path, *args, **kwargs)
-        self.group = group
+@dataclass
+class DeactivateGrasp(Command):
+    """Create or remove a fixed joint between two bodies and open/close a
+    gripper."""
 
-    def reverse(self, **kwargs):
-        return self.__class__(
-            self.body,
-            self.group,
-            self.path[::-1],
-            velocity_scale=self.velocity_scale,
-            contact_links=self.contact_links,
-            time_after_contact=self.time_after_contact,
-            contexts=self.contexts,
-            **kwargs,
+    robot: int
+    gripper_link: int
+    body: int
+
+    def __repr__(self):
+        return "s{}".format(id(self) % 1000)
+
+
+@dataclass
+class Sequence(Command):
+    """A named sequence of commands to execute."""
+
+    commands: List[Command]
+    name: str = None
+
+    def __repr__(self):
+        return "s{}".format(id(self) % 1000)
+
+
+@dataclass
+class Conf:
+    robot: int
+    joints: List[int]
+    positions: List[float]
+
+    def __repr__(self):
+        return "q{}".format(id(self) % 1000)
+
+    def assign(self, sim: SimulatorInstance):
+        pbu.set_joint_positions(
+            sim.robot, self.joints, self.positions, client=sim.client
         )
 
-    def __repr__(self):
-        return "{}t{}".format(self.group[0], id(self) % 1000)
 
-
-class ParentBody(object):
-    def __init__(self, sim: SimulatorInstance, link=pbu.BASE_LINK):
-        self.body = sim.robot
-        self.link = link
-
-    def __iter__(self):
-        return iter([self.body, self.link])
-
-    def get_pose(self, **kwargs):
-        if self.body is None:
-            return pbu.unit_pose()
-        return pbu.get_link_pose(self.body, self.link, **kwargs)
+@dataclass
+class Attachment:
+    robot: int
+    robot_link: int
+    robot_T_obj: pbu.Pose
+    obj: int
 
     def __repr__(self):
-        return "Parent({})".format(self.body)
+        return "a{}".format(id(self) % 1000)
 
 
-class Switch(Command):
-    def __init__(self, sim: SimulatorInstance, parent=None):
-        self.sim = sim
-        self.parent = parent
-
-    def iterate(self, state, **kwargs):
-
-        if self.parent is None and self.body in state.attachments.keys():
-            del state.attachments[self.body]
-
-        elif self.parent is not None:
-            robot, _ = self.parent
-
-            gripper_joints = robot.get_group_joints(GRIPPER_GROUP, **kwargs)
-            finger_links = robot.get_finger_links(gripper_joints, **kwargs)
-
-            movable_bodies = [
-                body for body in pbu.get_bodies(**kwargs) if (body != robot)
-            ]
-
-            max_distance = 5e-2
-            collision_bodies = [
-                body
-                for body in movable_bodies
-                if (
-                    all(
-                        pbu.get_closest_points(
-                            robot, body, link1=link, max_distance=max_distance, **kwargs
-                        )
-                        for link in finger_links
-                    )
-                    and pbu.get_mass(body, **kwargs) != pbu.STATIC_MASS
-                )
-            ]
-
-            if len(collision_bodies) > 0:
-                relative_pose = RelativePose(
-                    collision_bodies[0], parent=self.parent, **kwargs
-                )
-                state.attachments[self.body] = relative_pose
-
-        return pbu.empty_sequence()
-
-    def __repr__(self):
-        return "{}({})".format(self.__class__.__name__, self.body)
-
-    def to_lisdf(self):
-        return []
-
-
-class Grasp(object):  # RelativePose
-    def __init__(
-        self,
-        sim: SimulatorInstance,
-        grasp,
-        pregrasp=None,
-        closed_position=0.0,
-        **kwargs,
-    ):
-        self.sim = sim
-        self.grasp = grasp
-        if pregrasp is None:
-            pregrasp = self.get_pregrasp(grasp)
-        self.pregrasp = pregrasp
-        self.closed_position = closed_position
+@dataclass
+class Grasp:
+    attachment: Attachment
+    closed_position: float = 0.0
 
     def get_pregrasp(
         self,
-        grasp_tool,
-        gripper_from_tool=pbu.unit_pose(),
-        tool_distance=PREGRASP_DISTANCE,
-        object_distance=PREGRASP_DISTANCE,
+        current_tool_pose: pbu.Pose,
+        gripper_T_tool: pbu.Pose = pbu.unit_pose(),
+        tool_distance: float = PREGRASP_DISTANCE,
+        object_distance: float = PREGRASP_DISTANCE,
     ):
         return pbu.multiply(
-            gripper_from_tool,
+            gripper_T_tool,
             pbu.Pose(pbu.Point(x=tool_distance)),
-            grasp_tool,
+            current_tool_pose,
             pbu.Pose(pbu.Point(z=-object_distance)),
         )
 
-    @property
-    def value(self):
-        return self.grasp
-
-    @property
-    def approach(self):
-        return self.pregrasp
-
-    def create_relative_pose(self, robot, link=pbu.BASE_LINK, **kwargs):
-        parent = ParentBody(body=robot, link=link, **kwargs)
-        return RelativePose(
-            self.body, parent=parent, relative_pose=self.grasp, **kwargs
-        )
-
-    def create_attachment(self, *args, **kwargs):
-        relative_pose = self.create_relative_pose(*args, **kwargs)
-        return relative_pose.get_attachment()
-
     def __repr__(self):
         return "g{}".format(id(self) % 1000)
-
-
-class Sequence(Command):
-    def __init__(self, commands=[], name=None):
-        self.context = None
-        self.commands = tuple(commands)
-        self.name = self.__class__.__name__.lower()[:3] if (name is None) else name
-
-    @property
-    def context_bodies(self):
-        return set(
-            itertools.chain(*[command.context_bodies for command in self.commands])
-        )
-
-    def __len__(self):
-        return len(self.commands)
-
-    def iterate(self, *args, **kwargs):
-        for command in self.commands:
-            print("Executing {} command: {}".format(type(command), str(command)))
-            for output in command.iterate(*args, **kwargs):
-                yield output
-
-    def controller(self, *args, **kwargs):
-        return itertools.chain.from_iterable(
-            command.controller(*args, **kwargs) for command in self.commands
-        )
-
-    def execute(self, *args, return_executed=False, **kwargs):
-        executed = []
-        for command in self.commands:
-            if not command.execute(*args, **kwargs):
-                return False, executed if return_executed else False
-            executed.append(command)
-        return True, executed if return_executed else True
-
-    def reverse(self):
-        return Sequence(
-            [command.reverse() for command in reversed(self.commands)], name=self.name
-        )
-
-    def dump(self):
-        print("[{}]".format(" -> ".join(map(repr, self.commands))))
-
-    def __repr__(self):
-        return "{}({})".format(self.name, len(self.commands))
-
-
-class RelativePose(object):
-    def __init__(
-        self,
-        sim: SimulatorInstance,
-        body,
-        parent=None,
-        parent_state=None,
-        relative_pose=None,
-        important=False,
-        **kwargs,
-    ):
-        self.sim = sim
-        self.body = body
-        self.parent = parent
-        self.parent_state = parent_state
-        if relative_pose is None:
-            relative_pose = pbu.multiply(
-                pbu.invert(self.get_parent_pose(**kwargs)),
-                pbu.get_pose(self.body, **kwargs),
-            )
-        self.relative_pose = tuple(relative_pose)
-        self.important = important
-
-    @property
-    def value(self):
-        return self.relative_pose
-
-    def ancestors(self):
-        if self.parent_state is None:
-            return [self.body]
-        return self.parent_state.ancestors() + [self.body]
-
-    def get_parent_pose(self, **kwargs):
-        if self.parent is None:
-            return pbu.unit_pose()
-        if self.parent_state is not None:
-            self.parent_state.assign(**kwargs)
-        return self.parent.get_pose(**kwargs)
-
-    def get_pose(self, **kwargs):
-        return pbu.multiply(self.get_parent_pose(**kwargs), self.relative_pose)
-
-    def assign(self, **kwargs):
-        world_pose = self.get_pose(**kwargs)
-        pbu.set_pose(self.body, world_pose, **kwargs)
-        return world_pose
-
-    def get_attachment(self, **kwargs):
-        assert self.parent is not None
-        parent_body, parent_link = self.parent
-        return pbu.Attachment(
-            parent_body, parent_link, self.relative_pose, self.body, **kwargs
-        )
-
-    def __repr__(self):
-        name = "wp" if self.parent is None else "rp"
-        return "{}{}".format(name, id(self) % 1000)

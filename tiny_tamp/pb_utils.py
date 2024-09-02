@@ -2250,33 +2250,6 @@ def body_from_end_effector(end_effector_pose, grasp_pose):
     return multiply(end_effector_pose, grasp_pose)
 
 
-class Attachment(object):
-    def __init__(self, parent, parent_link, grasp_pose, child, **kwargs):
-        self.parent = parent
-        self.parent_link = parent_link
-        self.grasp_pose = grasp_pose
-        self.child = child
-
-    @property
-    def bodies(self):
-        return flatten_links(self.child) | flatten_links(
-            self.parent, get_link_subtree(self.parent, self.parent_link)
-        )
-
-    def assign(self, **kwargs):
-        parent_link_pose = get_link_pose(self.parent, self.parent_link, **kwargs)
-        child_pose = body_from_end_effector(parent_link_pose, self.grasp_pose)
-        set_pose(self.child, child_pose, **kwargs)
-        return child_pose
-
-    def apply_mapping(self, mapping):
-        self.parent = mapping.get(self.parent, self.parent)
-        self.child = mapping.get(self.child, self.child)
-
-    def __repr__(self):
-        return "{}({},{})".format(self.__class__.__name__, self.parent, self.child)
-
-
 def pairwise_collisions(body, obstacles, link=None, **kwargs):
     return any(
         pairwise_collision(body1=body, body2=other, link1=link, **kwargs)

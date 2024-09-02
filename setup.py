@@ -7,5 +7,5 @@ setup(
     version="0.1.0",
     packages=["tiny_tamp"],
     include_package_data=True,
-    install_requires=["pybullet", "scipy"],
+    install_requires=["pybullet", "scipy", "zmq", "numpy"],
 )

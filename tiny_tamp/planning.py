@@ -1,25 +1,10 @@
 from __future__ import annotations
 
 import math
+import random
+from typing import Callable, List
 
 import numpy as np
-from structs import (
-    ARM_GROUP,
-    COLLISION_DISTANCE,
-    COLLISION_EPSILON,
-    GRIPPER_GROUP,
-    MAX_IK_DISTANCE,
-    MAX_IK_TIME,
-    SELF_COLLISIONS,
-    Grasp,
-    GroupConf,
-    GroupTrajectory,
-    ParentBody,
-    RelativePose,
-    Sequence,
-    SimulatorInstance,
-    Switch,
-)
 
 import tiny_tamp.pb_utils as pbu
 from tiny_tamp.inverse_kinematics.franka_panda.ik import PANDA_INFO
@@ -28,17 +13,34 @@ from tiny_tamp.inverse_kinematics.ikfast import (
     get_ik_joints,
     ikfast_inverse_kinematics,
 )
+from tiny_tamp.structs import (
+    COLLISION_DISTANCE,
+    COLLISION_EPSILON,
+    MAX_IK_DISTANCE,
+    MAX_IK_TIME,
+    SELF_COLLISIONS,
+    ActivateGrasp,
+    Attachment,
+    Conf,
+    DeactivateGrasp,
+    Grasp,
+    Sequence,
+    SimulatorInstance,
+    Trajectory,
+    WorldBelief,
+)
 
 
-def get_plan_motion_fn(sim: SimulatorInstance, environment=[], debug=False, **kwargs):
+def get_plan_motion_fn(
+    sim: SimulatorInstance, environment: List[int] = [], debug: bool = False
+):
+    """Plan a motion from one configuration to another."""
 
-    def fn(q1, q2, attachments=[]):
-        print("Plan motion fn {}->{}".format(q1, q2))
-
+    def fn(q1: Conf, q2: Conf, attachments: List[Attachment] = []):
         obstacles = list(environment)
         attached = {attachment.child for attachment in attachments}
         obstacles = set(obstacles) - attached
-        q1.assign(**kwargs)
+        q1.assign(sim)
 
         resolutions = math.radians(10) * np.ones(len(q2.joints))
 
@@ -57,23 +59,12 @@ def get_plan_motion_fn(sim: SimulatorInstance, environment=[], debug=False, **kw
             debug=debug,
             disable_collisions=False,
             client=sim.client,
-            **kwargs,
         )
 
         if path is None:
-            for conf in [q1, q2]:
-                conf.assign(**kwargs)
-                for attachment in attachments:
-                    attachment.assign(**kwargs)
             return None
 
-        sequence = Sequence(
-            commands=[
-                GroupTrajectory(sim, ARM_GROUP, path, **kwargs),
-            ],
-            name="move-{}".format(ARM_GROUP),
-        )
-        return sequence
+        return Trajectory(sim.robot, q2.joints, path)
 
     return fn
 
@@ -85,15 +76,19 @@ def plan_workspace_motion(
     obstacles=[],
     max_attempts=2,
     debug=False,
-    **kwargs,
 ):
+    """Return a joint path that moves the tool along the tool waypoints.
+
+    This is useful if you want to move the gripper in a straight line
+    path.
+    """
 
     assert tool_waypoints
 
     tool_link = sim.tool_link
-    ik_joints = get_ik_joints(sim.robot, PANDA_INFO, tool_link, **kwargs)  # Arm + torso
-    fixed_joints = set(ik_joints) - set(sim.robot.get_group_joints(ARM_GROUP, **kwargs))
-    arm_joints = [j for j in ik_joints if j not in fixed_joints]  # Arm only
+    ik_joints = get_ik_joints(sim.robot, PANDA_INFO, tool_link, client=sim.client)
+    fixed_joints = set(ik_joints) - set(sim.get_group_joints(sim.arm_group))
+    arm_joints = [j for j in ik_joints if j not in fixed_joints]
     extract_arm_conf = lambda q: [
         p for j, p in pbu.safe_zip(ik_joints, q) if j not in fixed_joints
     ]
@@ -106,7 +101,7 @@ def plan_workspace_motion(
         attachments=[],
         self_collisions=SELF_COLLISIONS,
         disable_collisions=False,
-        **kwargs,
+        client=sim.client,
     )
 
     for attempts in range(max_attempts):
@@ -120,7 +115,7 @@ def plan_workspace_motion(
             max_time=np.inf,
             max_distance=None,
             use_halton=False,
-            **kwargs,
+            client=sim.client,
         ):
             arm_conf = extract_arm_conf(arm_conf)
 
@@ -140,7 +135,7 @@ def plan_workspace_motion(
                         max_time=MAX_IK_TIME,
                         max_distance=MAX_IK_DISTANCE,
                         verbose=False,
-                        **kwargs,
+                        client=sim.client,
                     ),
                     None,
                 )
@@ -150,34 +145,34 @@ def plan_workspace_motion(
                 arm_conf = extract_arm_conf(arm_conf)
                 if collision_fn(arm_conf):
                     if debug:
-                        pbu.wait_if_gui(**kwargs)
+                        pbu.wait_if_gui(client=sim.client)
                     continue
                 arm_waypoints.append(arm_conf)
             else:
                 pbu.set_joint_positions(
-                    sim.robot, arm_joints, arm_waypoints[-1], **kwargs
+                    sim.robot, arm_joints, arm_waypoints[-1], client=sim.client
                 )
                 if attachment is not None:
-                    attachment.assign(**kwargs)
+                    attachment.assign(sim)
                 if any(
                     pbu.pairwise_collisions(
                         part,
                         obstacles,
                         max_distance=(COLLISION_DISTANCE + COLLISION_EPSILON),
-                        **kwargs,
+                        client=sim.client,
                     )
                     for part in parts
                 ):
                     if debug:
-                        pbu.wait_if_gui(**kwargs)
+                        pbu.wait_if_gui(client=sim.client)
                     continue
                 arm_path = pbu.interpolate_joint_waypoints(
-                    sim.robot, arm_joints, arm_waypoints, **kwargs
+                    sim.robot, arm_joints, arm_waypoints, client=sim.client
                 )
 
                 if any(collision_fn(q) for q in arm_path):
                     if debug:
-                        pbu.wait_if_gui(**kwargs)
+                        pbu.wait_if_gui(client=sim.client)
                     continue
 
                 print(
@@ -187,7 +182,6 @@ def plan_workspace_motion(
                 )
 
                 return arm_path
-    print("[plan_workspace_motion] max_attempts reached")
     return None
 
 
@@ -201,31 +195,39 @@ def compute_gripper_path(pose, grasp, pos_step_size=0.02):
 
 
 def workspace_collision(
-    robot,
+    sim: SimulatorInstance,
     gripper_path,
     grasp=None,
     open_gripper=True,
     obstacles=[],
     max_distance=0.0,
-    **kwargs,
 ):
-    gripper = robot.get_component(GRIPPER_GROUP, **kwargs)
+    gripper = sim.get_component(sim.gripper_group)
 
     if open_gripper:
-        _, open_conf = robot.get_group_limits(GRIPPER_GROUP, **kwargs)
-        gripper_joints = robot.get_component_joints(GRIPPER_GROUP, **kwargs)
-        pbu.set_joint_positions(gripper, gripper_joints, open_conf, **kwargs)
+        _, open_conf = sim.get_group_limits(sim.gripper_group)
+        gripper_joints = sim.get_component_joints(sim.gripper_group)
+        pbu.set_joint_positions(gripper, gripper_joints, open_conf, client=sim.client)
 
-    parent_from_tool = robot.get_parent_from_tool(**kwargs)
+    tool_parent = pbu.get_link_parent(
+        sim.robot, sim.get_group_joints(sim.arm_group)[0], client=sim.client
+    )
+    parent_from_tool = pbu.get_link_pose(sim.robot, tool_parent, client=sim.client)
+
     parts = [gripper]
     if grasp is not None:
         parts.append(grasp.body)
+
     for i, gripper_pose in enumerate(gripper_path):
         pbu.set_pose(
-            gripper, pbu.multiply(gripper_pose, pbu.invert(parent_from_tool)), **kwargs
+            gripper,
+            pbu.multiply(gripper_pose, pbu.invert(parent_from_tool)),
+            client=sim.client,
         )
         if grasp is not None:
-            pbu.set_pose(grasp.body, pbu.multiply(gripper_pose, grasp.value), **kwargs)
+            pbu.set_pose(
+                grasp.body, pbu.multiply(gripper_pose, grasp.value), client=sim.client
+            )
 
         distance = (
             (COLLISION_DISTANCE + COLLISION_EPSILON)
@@ -233,32 +235,27 @@ def workspace_collision(
             else max_distance
         )
         if any(
-            pbu.pairwise_collisions(part, obstacles, max_distance=distance, **kwargs)
+            pbu.pairwise_collisions(
+                part, obstacles, max_distance=distance, client=sim.client
+            )
             for part in parts
         ):
             return True
     return False
 
 
-def create_grasp_attachment(sim: SimulatorInstance, grasp: Grasp, **kwargs):
-    return grasp.create_attachment(sim.robot, link=sim.tool_link)
+def plan_prehensile(
+    sim: SimulatorInstance, obj, pose, grasp, environment=[], debug=False, **kwargs
+):
 
-
-def plan_prehensile(sim, obj, pose, grasp, environment=[], debug=False, **kwargs):
-
-    pose.assign(**kwargs)
-
+    pbu.set_pose(obj, pose, client=sim.client)
     gripper_path = compute_gripper_path(pose, grasp)
     gripper_waypoints = gripper_path[:1] + gripper_path[-1:]
     if workspace_collision(
         sim, gripper_path, grasp=None, obstacles=environment, **kwargs
     ):
-        if debug:
-            print("[plan_prehensile] workspace collision")
-        pbu.wait_if_gui(**kwargs)
         return None
 
-    create_grasp_attachment(sim.robot, grasp)
     arm_path = plan_workspace_motion(
         sim.robot,
         gripper_waypoints,
@@ -269,51 +266,27 @@ def plan_prehensile(sim, obj, pose, grasp, environment=[], debug=False, **kwargs
     return arm_path
 
 
-def get_plan_pick_fn(sim, environment=[], debug=False, **kwargs):
+def get_plan_pick_fn(sim: SimulatorInstance, environment: List[int] = [], debug=False):
     environment = environment
 
-    def fn(obj, pose, grasp):
+    def fn(obj, pose: pbu.Pose, grasp: Grasp):
         arm_path = plan_prehensile(
-            sim, obj, pose, grasp, environment=environment, debug=debug, **kwargs
+            sim, obj, pose, grasp, environment=environment, debug=debug
         )
 
         if arm_path is None:
             return None
 
-        arm_traj = GroupTrajectory(
-            sim,
-            ARM_GROUP,
+        arm_traj = Trajectory(
+            sim.robot,
+            sim.get_group_joints(sim.arm_group),
             arm_path[::-1],
             context=[pose],
             velocity_scale=0.25,
-            **kwargs,
         )
-        arm_conf = arm_traj.first()
-
-        closed_conf = grasp.closed_position * np.ones(
-            len(sim.get_group_joints(GRIPPER_GROUP, **kwargs))
-        )
-        gripper_traj = GroupTrajectory(
-            sim,
-            GRIPPER_GROUP,
-            path=[closed_conf],
-            contexts=[pose],
-            contact_links=sim.get_finger_links(
-                sim.get_group_joints(GRIPPER_GROUP, **kwargs), **kwargs
-            ),
-            time_after_contact=1e-1,
-            **kwargs,
-        )
-        switch = Switch(
-            obj,
-            parent=ParentBody(
-                body=sim.robot,
-                link=sim.tool_link,
-                **kwargs,
-            ),
-        )
-
-        commands = [arm_traj, switch, gripper_traj, arm_traj.reverse(**kwargs)]
+        arm_conf = arm_traj[0]
+        switch = ActivateGrasp(sim.robot, sim.tool_link, obj)
+        commands = [arm_traj, switch, arm_traj.reverse()]
         sequence = Sequence(commands=commands, name="pick-{}".format(obj))
         return (arm_conf, sequence)
 
@@ -323,38 +296,25 @@ def get_plan_pick_fn(sim, environment=[], debug=False, **kwargs):
 #######################################################
 
 
-def get_plan_place_fn(robot, environment=[], debug=False, **kwargs):
+def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
     environment = environment
 
     def fn(obj, pose, grasp):
         arm_path = plan_prehensile(
-            robot, obj, pose, grasp, environment=environment, debug=debug, **kwargs
+            sim.robot, obj, pose, grasp, environment=environment, debug=debug
         )
         if arm_path is None:
-            print("[plan_place_fn] arm_path is None")
             return None
 
-        arm_traj = GroupTrajectory(
-            robot,
-            ARM_GROUP,
-            arm_path[::-1],
-            context=[grasp],
+        arm_traj = Trajectory(
+            sim.robot,
+            sim.get_group_joints(sim.arm_group),
+            arm_path,
             velocity_scale=0.25,
-            **kwargs,
         )
         arm_conf = arm_traj.first()
-
-        _, open_conf = robot.get_group_limits(GRIPPER_GROUP, **kwargs)
-        gripper_traj = GroupTrajectory(
-            robot,
-            GRIPPER_GROUP,
-            path=[open_conf],
-            contexts=[grasp],
-            **kwargs,
-        )
-        switch = Switch(obj, parent=None)
-
-        commands = [arm_traj, gripper_traj, switch, arm_traj.reverse(**kwargs)]
+        switch = DeactivateGrasp(sim.robot, sim.tool_link, obj)
+        commands = [arm_traj, switch, arm_traj.reverse()]
         sequence = Sequence(commands=commands, name="place-{}".format(obj))
 
         return (arm_conf, sequence)
@@ -362,55 +322,64 @@ def get_plan_place_fn(robot, environment=[], debug=False, **kwargs):
     return fn
 
 
+def get_random_placement_pose(obj, surface_aabb, client):
+    return pbu.Pose(
+        point=pbu.Point(
+            x=random.uniform(surface_aabb.lower[0], surface_aabb.upper[0]),
+            y=random.uniform(surface_aabb.upper[1], surface_aabb.upper[1]),
+            z=pbu.stable_z_on_aabb(obj, surface_aabb, client=client),
+        ),
+        euler=pbu.Euler(yaw=random.uniform(0, math.pi * 2)),
+    )
+
+
 def get_pick_place_plan(
     sim: SimulatorInstance,
+    belief: WorldBelief,
     obj: int,
-    placement_pose: pbu.Pose,
-    grasp_sampler,
-    motion_planner,
-    csp_debug=False,
-):
+    grasp_sampler: Callable[[int, pbu.AABB, pbu.Pose], Grasp],
+    motion_planner: Callable[[Conf, Conf, List[Attachment]], Trajectory],
+    max_grasp_attempts=5,
+    max_pick_attempts=5,
+    max_place_attempts=5,
+) -> Sequence:
 
-    MAX_GRASP_ATTEMPTS = 100
-    MAX_PICK_ATTEMPTS = 1
-    MAX_PLACE_ATTEMPTS = 1
+    # Only plan with the digital twin
+    assert not sim.real_robot
+
+    # Make sure the simulator matches the belief
+    sim.set_belief(belief)
 
     body_saver = pbu.WorldSaver(client=sim.client)
-    obj_aabb, obj_pose = pbu.get_aabb(obj, client=sim.client), pbu.get_pose(
-        obj, client=sim.client
-    )
+    obj_aabb = pbu.get_aabb(obj, client=sim.client)
+    obj_pose = pbu.get_pose(obj, client=sim.client)
 
     obstacles = sim.movable_objects + [sim.table]
 
     pick_planner = get_plan_pick_fn(
         sim,
         environment=obstacles,
-        max_attempts=MAX_PICK_ATTEMPTS,
-        debug=csp_debug,
+        max_attempts=max_pick_attempts,
         client=sim.client,
     )
     place_planner = get_plan_place_fn(
         sim,
         environment=obstacles,
-        max_attempts=MAX_PLACE_ATTEMPTS,
-        debug=csp_debug,
+        max_attempts=max_place_attempts,
         client=sim.client,
     )
 
-    pose = RelativePose(obj, client=sim.client)
-    q1 = GroupConf(
-        sim.robot, ARM_GROUP, sim.robot.arm_group.get_joint_values(), client=sim.client
-    )
+    q1 = Conf(sim.get_group_joints(sim.arm_group), client=sim.client)
 
-    for gi in range(MAX_GRASP_ATTEMPTS):
+    for gi in range(max_grasp_attempts):
         print("[Planner] grasp attempt " + str(gi))
         body_saver.restore()
-        (grasp,) = next(grasp_sampler(obj, obj_aabb, obj_pose))
+        grasp: Grasp = grasp_sampler(obj, obj_aabb, obj_pose)
 
         print("[Planner] finding pick plan for grasp " + str(grasp))
-        for _ in range(MAX_PICK_ATTEMPTS):
+        for _ in range(max_pick_attempts):
             body_saver.restore()
-            pick = pick_planner(obj, pose, grasp)
+            pick = pick_planner(obj, obj_pose, grasp)
             if pick is not None:
                 break
 
@@ -418,16 +387,14 @@ def get_pick_place_plan(
             continue
 
         q2, at1 = pick
-        q2.assign(client=sim.client)
+        q2.assign(sim)
 
-        print("[Planner] finding place plan")
-        for _ in range(MAX_PLACE_ATTEMPTS):
-            place_rp = RelativePose(
-                obj, parent=None, relative_pose=placement_pose, client=sim.client
+        for _ in range(max_place_attempts):
+            placement_pose = get_random_placement_pose(
+                obj, pbu.get_aabb(sim.table), sim.client
             )
-            print("[Place Planner] Placement for pose: " + str(place_rp))
             body_saver.restore()
-            place = place_planner(obj, place_rp, grasp)
+            place = place_planner(obj, placement_pose, grasp)
 
             if place is not None:
                 break
@@ -436,10 +403,7 @@ def get_pick_place_plan(
             continue
 
         q3, at2 = place
-        q3.assign(client=sim.client)
-
-        if csp_debug:
-            pbu.wait_if_gui("Placing like this", client=sim.client)
+        q3.assign(sim)
 
         attachment = grasp.create_attachment(sim.robot, link=sim.tool_link)
 
@@ -455,5 +419,5 @@ def get_pick_place_plan(
         if motion_plan2 is None:
             continue
 
-        return Sequence([motion_plan1, at1, motion_plan2, at2])
+        return Sequence([motion_plan1, at1, motion_plan2, at2], name="pick-place")
     return None

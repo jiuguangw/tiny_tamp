@@ -20,6 +20,7 @@ from tiny_tamp.structs import (
     Sequence,
     SimulatorInstance,
     WorldBelief,
+    Attachment
 )
 
 
@@ -91,7 +92,7 @@ def get_grasp_gen_fn(
             pbu.Pose(euler=pbu.Euler(pitch=-np.pi / 2.0)),
             pbu.Pose(pbu.Point(z=-0.01)),
         )
-        return Grasp(closed_position, grasp_pose)
+        return Grasp(attachment=Attachment(sim.robot, sim.tool_link, obj, grasp_pose), closed_position=closed_position)
 
     return gen_fn
 

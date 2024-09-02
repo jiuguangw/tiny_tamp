@@ -165,7 +165,7 @@ class SimulatorInstance:
         )
         body_joints = pbu.get_movable_joint_descendants(
             self.robot,
-            self.get_group_parent(group, client=self.client),
+            self.get_group_parent(group),
             client=self.client,
         )
         return OrderedDict(pbu.safe_zip(body_joints, component_joints))
@@ -348,10 +348,10 @@ class Conf:
 
 @dataclass
 class Attachment:
-    robot: int
-    robot_link: int
-    robot_T_obj: pbu.Pose
-    obj: int
+    parent: int
+    parent_link: int
+    child: int
+    parent_T_child: pbu.Pose
 
     def __repr__(self):
         return "a{}".format(id(self) % 1000)
@@ -362,13 +362,13 @@ class Grasp:
     attachment: Attachment
     closed_position: float = 0.0
 
-    def get_pregrasp(
+    def get_pregrasp_pose(
         self,
         current_tool_pose: pbu.Pose,
         gripper_T_tool: pbu.Pose = pbu.unit_pose(),
         tool_distance: float = PREGRASP_DISTANCE,
         object_distance: float = PREGRASP_DISTANCE,
-    ):
+    ) -> pbu.Pose:
         return pbu.multiply(
             gripper_T_tool,
             pbu.Pose(pbu.Point(x=tool_distance)),

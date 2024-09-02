@@ -185,9 +185,9 @@ def plan_workspace_motion(
     return None
 
 
-def compute_gripper_path(pose, grasp, pos_step_size=0.02):
-    grasp_pose = pbu.multiply(pose.get_pose(), pbu.invert(grasp.grasp))
-    pregrasp_pose = pbu.multiply(pose.get_pose(), pbu.invert(grasp.pregrasp))
+def compute_gripper_path(pose:pbu.Pose, grasp:Grasp, pos_step_size=0.02):
+    grasp_pose = pbu.multiply(pose, pbu.invert(grasp.attachment.parent_T_child))
+    pregrasp_pose = pbu.multiply(pose, pbu.invert(grasp.get_pregrasp_pose(grasp_pose)))
     gripper_path = list(
         pbu.interpolate_poses(grasp_pose, pregrasp_pose, pos_step_size=pos_step_size)
     )
@@ -353,10 +353,12 @@ def get_pick_place_plan(
     body_saver = pbu.WorldSaver(client=sim.client)
 
     obstacles = sim.movable_objects + [sim.table]
+    obj_pose = pbu.get_pose(obj, client=sim.client)
 
     pick_planner = get_plan_pick_fn(sim, environment=obstacles)
     place_planner = get_plan_place_fn(sim, environment=obstacles)
-
+    
+    statistics = {}
     q1 = Conf(
         sim.robot,
         sim.get_group_joints(sim.arm_group),
@@ -371,7 +373,7 @@ def get_pick_place_plan(
         print("[Planner] finding pick plan for grasp " + str(grasp))
         for _ in range(max_pick_attempts):
             body_saver.restore()
-            pick = pick_planner(obj, grasp)
+            pick = pick_planner(obj, obj_pose, grasp)
             if pick is not None:
                 break
 
@@ -411,5 +413,5 @@ def get_pick_place_plan(
         if motion_plan2 is None:
             continue
 
-        return Sequence([motion_plan1, at1, motion_plan2, at2], name="pick-place")
-    return None
+        return Sequence([motion_plan1, at1, motion_plan2, at2], name="pick-place"), statistics
+    return None, statistics

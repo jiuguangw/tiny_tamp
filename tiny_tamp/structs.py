@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import itertools
 import time
-from abc import ABC
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List
@@ -190,7 +188,7 @@ class SimulatorInstance:
 
     @property
     def tool_link(self):
-        pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
+        return pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
 
     def get_group_joints(self, group):
         return pbu.joints_from_names(
@@ -234,10 +232,10 @@ class SimulatorInstance:
         if self.real_robot:
             self.sender.command_arm(positions)
 
-    def command_trajectory(self, trajectory, dt=0.01):
+    def command_trajectory(self, trajectory: Trajectory, dt=0.05):
 
         named_positions = []
-        for positions in trajectory:
+        for positions in trajectory.path:
             self.set_group_positions(ARM_GROUP, positions)
             named_positions.append(
                 {
@@ -245,23 +243,37 @@ class SimulatorInstance:
                     for name, position in zip(PANDA_GROUPS[ARM_GROUP], positions)
                 }
             )
+            for attachment in trajectory.attachments:
+                pbu.set_pose(
+                    attachment.child,
+                    pbu.multiply(
+                        pbu.get_link_pose(
+                            attachment.parent,
+                            attachment.parent_link,
+                            client=self.client,
+                        ),
+                        attachment.parent_T_child,
+                    ),
+                    client=self.client,
+                )
             time.sleep(dt)
 
         if self.real_robot:
             self.sender.execute_position_path(named_positions)
 
-    def execute_sequence(self, sequence):
-        for command in sequence:
-            if isinstance(command, Trajectory):
-                self.command_trajectory(command.path)
-            elif isinstance(command, ActivateGrasp):
-                self.close_gripper(command)
-            elif isinstance(command, DeactivateGrasp):
-                self.open_gripper(command)
-            elif isinstance(command, Sequence):
-                self.execute_sequence(command.commands)
-            else:
-                raise ValueError("Unknown command type: {}".format(command))
+    def execute_command(self, command):
+        print("Executing command: {}".format(command))
+        if isinstance(command, Trajectory):
+            self.command_trajectory(command)
+        elif isinstance(command, ActivateGrasp):
+            self.close_gripper()
+        elif isinstance(command, DeactivateGrasp):
+            self.open_gripper()
+        elif isinstance(command, Sequence):
+            for subcommand in command.commands:
+                self.execute_command(subcommand)
+        else:
+            raise ValueError("Unknown command type: {}".format(command))
 
 
 @dataclass
@@ -283,6 +295,7 @@ class Trajectory(Command):
 
     def reverse(self):
         return self.__class__(
+            self.robot,
             self.joints,
             self.path[::-1],
             velocity_scale=self.velocity_scale,
@@ -328,7 +341,18 @@ class Sequence(Command):
     name: str = None
 
     def __repr__(self):
-        return "s{}".format(id(self) % 1000)
+        return "({})".format(
+            " ".join(
+                [
+                    (
+                        repr(command)
+                        if not isinstance(command, Sequence)
+                        else repr(command).replace("(", "").replace(")", "")
+                    )
+                    for command in self.commands
+                ]
+            )
+        )
 
 
 @dataclass
@@ -364,7 +388,7 @@ class Grasp:
 
     def get_pregrasp_pose(
         self,
-        current_tool_pose: pbu.Pose,
+        grasp_pose: pbu.Pose,
         gripper_T_tool: pbu.Pose = pbu.unit_pose(),
         tool_distance: float = PREGRASP_DISTANCE,
         object_distance: float = PREGRASP_DISTANCE,
@@ -372,7 +396,7 @@ class Grasp:
         return pbu.multiply(
             gripper_T_tool,
             pbu.Pose(pbu.Point(x=tool_distance)),
-            current_tool_pose,
+            grasp_pose,
             pbu.Pose(pbu.Point(z=-object_distance)),
         )
 

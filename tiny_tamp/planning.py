@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import random
 from typing import Callable, List
@@ -64,7 +65,7 @@ def get_plan_motion_fn(
         if path is None:
             return None
 
-        return Trajectory(sim.robot, q2.joints, path)
+        return Trajectory(sim.robot, q2.joints, path, attachments=attachments)
 
     return fn
 
@@ -185,9 +186,11 @@ def plan_workspace_motion(
     return None
 
 
-def compute_gripper_path(pose:pbu.Pose, grasp:Grasp, pos_step_size=0.02):
+def compute_gripper_path(pose: pbu.Pose, grasp: Grasp, pos_step_size=0.02):
     grasp_pose = pbu.multiply(pose, pbu.invert(grasp.attachment.parent_T_child))
-    pregrasp_pose = pbu.multiply(pose, pbu.invert(grasp.get_pregrasp_pose(grasp_pose)))
+    pregrasp_pose = pbu.multiply(
+        pose, pbu.invert(grasp.get_pregrasp_pose(grasp.attachment.parent_T_child))
+    )
     gripper_path = list(
         pbu.interpolate_poses(grasp_pose, pregrasp_pose, pos_step_size=pos_step_size)
     )
@@ -209,16 +212,17 @@ def workspace_collision(
         gripper_joints = sim.get_component_joints(sim.gripper_group)
         pbu.set_joint_positions(gripper, gripper_joints, open_conf, client=sim.client)
 
-    tool_parent = pbu.get_link_parent(
-        sim.robot, sim.get_group_joints(sim.arm_group)[0], client=sim.client
+    parent_link = sim.get_group_parent(sim.gripper_group)
+    parent_from_tool = pbu.get_relative_pose(
+        sim.robot, sim.tool_link, parent_link, client=sim.client
     )
-    parent_from_tool = pbu.get_link_pose(sim.robot, tool_parent, client=sim.client)
 
     parts = [gripper]
     if grasp is not None:
         parts.append(grasp.body)
 
     for i, gripper_pose in enumerate(gripper_path):
+        print(gripper_pose)
         pbu.set_pose(
             gripper,
             pbu.multiply(gripper_pose, pbu.invert(parent_from_tool)),
@@ -240,29 +244,35 @@ def workspace_collision(
             )
             for part in parts
         ):
+
+            print("[workspace_collision] gripper path in collision")
             return True
+
     return False
 
 
 def plan_prehensile(
-    sim: SimulatorInstance, obj, pose, grasp, environment=[], debug=False, **kwargs
+    sim: SimulatorInstance, obj, pose, grasp, environment=[], debug=False
 ):
 
     pbu.set_pose(obj, pose, client=sim.client)
     gripper_path = compute_gripper_path(pose, grasp)
     gripper_waypoints = gripper_path[:1] + gripper_path[-1:]
-    if workspace_collision(
-        sim, gripper_path, grasp=None, obstacles=environment, **kwargs
-    ):
+    if workspace_collision(sim, gripper_path, grasp=None, obstacles=environment):
+        print("[plan_prehensile] gripper path in collision")
         return None
 
     arm_path = plan_workspace_motion(
-        sim.robot,
+        sim,
         gripper_waypoints,
         attachment=None,
         obstacles=environment,
         debug=debug,
     )
+
+    if arm_path is None:
+        print("[plan_prehensile] arm path none")
+
     return arm_path
 
 
@@ -270,23 +280,30 @@ def get_plan_pick_fn(sim: SimulatorInstance, environment: List[int] = [], debug=
     environment = environment
 
     def fn(obj: int, pose: pbu.Pose, grasp: Grasp):
+        obstacles = list(set(environment) - {obj})
+        print(obj)
+        print("OBSTACLES", obstacles)
         arm_path = plan_prehensile(
-            sim, obj, pose, grasp, environment=environment, debug=debug
+            sim, obj, pose, grasp, environment=obstacles, debug=debug
         )
 
         if arm_path is None:
+            print("[get_plan_pick_fn] failed to find a plan")
             return None
 
         arm_traj = Trajectory(
             sim.robot,
             sim.get_group_joints(sim.arm_group),
             arm_path[::-1],
-            context=[pose],
             velocity_scale=0.25,
         )
-        arm_conf = arm_traj[0]
+        arm_conf = Conf(
+            sim.robot, sim.get_group_joints(sim.arm_group), arm_traj.path[0]
+        )
         switch = ActivateGrasp(sim.robot, sim.tool_link, obj)
-        commands = [arm_traj, switch, arm_traj.reverse()]
+        reverse_traj = copy.deepcopy(arm_traj).reverse()
+        reverse_traj.attachments = [grasp.attachment]
+        commands = [arm_traj, switch, reverse_traj]
         sequence = Sequence(commands=commands, name="pick-{}".format(obj))
         return (arm_conf, sequence)
 
@@ -300,8 +317,10 @@ def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
     environment = environment
 
     def fn(obj: int, pose: pbu.Pose, grasp: Grasp):
+
+        obstacles = list(set(environment) - {obj})
         arm_path = plan_prehensile(
-            sim.robot, obj, pose, grasp, environment=environment, debug=debug
+            sim, obj, pose, grasp, environment=obstacles, debug=debug
         )
         if arm_path is None:
             return None
@@ -309,12 +328,17 @@ def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
         arm_traj = Trajectory(
             sim.robot,
             sim.get_group_joints(sim.arm_group),
-            arm_path,
+            arm_path[::-1],
             velocity_scale=0.25,
+            attachments=[grasp.attachment],
         )
-        arm_conf = arm_traj.first()
+        arm_conf = Conf(
+            sim.robot, sim.get_group_joints(sim.arm_group), arm_traj.path[0]
+        )
         switch = DeactivateGrasp(sim.robot, sim.tool_link, obj)
-        commands = [arm_traj, switch, arm_traj.reverse()]
+        reverse_traj = copy.deepcopy(arm_traj).reverse()
+        reverse_traj.attachments = []
+        commands = [arm_traj, switch, reverse_traj]
         sequence = Sequence(commands=commands, name="place-{}".format(obj))
 
         return (arm_conf, sequence)
@@ -342,6 +366,7 @@ def get_pick_place_plan(
     max_grasp_attempts=5,
     max_pick_attempts=5,
     max_place_attempts=5,
+    placement_location=None,
 ) -> Sequence:
 
     # Only plan with the digital twin
@@ -357,7 +382,7 @@ def get_pick_place_plan(
 
     pick_planner = get_plan_pick_fn(sim, environment=obstacles)
     place_planner = get_plan_place_fn(sim, environment=obstacles)
-    
+
     statistics = {}
     q1 = Conf(
         sim.robot,
@@ -368,7 +393,7 @@ def get_pick_place_plan(
     for gi in range(max_grasp_attempts):
         print("[Planner] grasp attempt " + str(gi))
         body_saver.restore()
-        grasp: Grasp = grasp_sampler(obj)
+        grasp = grasp_sampler(obj)
 
         print("[Planner] finding pick plan for grasp " + str(grasp))
         for _ in range(max_pick_attempts):
@@ -384,9 +409,12 @@ def get_pick_place_plan(
         q2.assign(sim)
 
         for _ in range(max_place_attempts):
-            placement_pose = get_random_placement_pose(
-                obj, pbu.get_aabb(sim.table), sim.client
-            )
+            if placement_location is not None:
+                placement_pose = placement_location
+            else:
+                placement_pose = get_random_placement_pose(
+                    obj, pbu.get_aabb(sim.table, client=sim.client), sim.client
+                )
             body_saver.restore()
             place = place_planner(obj, placement_pose, grasp)
 
@@ -399,8 +427,6 @@ def get_pick_place_plan(
         q3, at2 = place
         q3.assign(sim)
 
-        attachment = grasp.create_attachment(sim.robot, link=sim.tool_link)
-
         print("[Planner] finding pick motion plan")
         body_saver.restore()
         motion_plan1 = motion_planner(q1, q2)
@@ -409,9 +435,12 @@ def get_pick_place_plan(
 
         print("[Planner] finding place motion plan")
         body_saver.restore()
-        motion_plan2 = motion_planner(q2, q3, attachments=[attachment])
+        motion_plan2 = motion_planner(q2, q3, attachments=[grasp.attachment])
         if motion_plan2 is None:
             continue
 
-        return Sequence([motion_plan1, at1, motion_plan2, at2], name="pick-place"), statistics
+        return (
+            Sequence([motion_plan1, at1, motion_plan2, at2], name=f"pick-place({obj})"),
+            statistics,
+        )
     return None, statistics

@@ -14,13 +14,13 @@ from tiny_tamp.structs import (
     DEFAULT_JOINT_POSITIONS,
     GRIPPER_GROUP,
     TABLE_POSE,
+    Attachment,
     GoalBelief,
     Grasp,
     ObjectState,
     Sequence,
     SimulatorInstance,
     WorldBelief,
-    Attachment
 )
 
 
@@ -92,7 +92,10 @@ def get_grasp_gen_fn(
             pbu.Pose(euler=pbu.Euler(pitch=-np.pi / 2.0)),
             pbu.Pose(pbu.Point(z=-0.01)),
         )
-        return Grasp(attachment=Attachment(sim.robot, sim.tool_link, obj, grasp_pose), closed_position=closed_position)
+        return Grasp(
+            attachment=Attachment(sim.robot, sim.tool_link, obj, grasp_pose),
+            closed_position=closed_position,
+        )
 
     return gen_fn
 
@@ -132,12 +135,14 @@ def main():
             goal_object_state.pose,
         )
         if (pos_error > 1e-2) or (ori_error > 1e-2):
+            sim_obj = twin_sim_instance.movable_objects[belief_object_index]
             subplan, statistics = get_pick_place_plan(
-                sim_instance,
+                twin_sim_instance,
                 belief,
-                sim_instance.movable_objects[belief_object_index],
+                sim_obj,
                 grasp_sampler,
                 motion_planner,
+                placement_location=goal_object_state.pose,
             )
             if subplan is None:
                 print("Planning failure")
@@ -147,7 +152,7 @@ def main():
             plan_components.append(subplan)
 
     plan_sequence = Sequence(plan_components, "rearrangement_plan")
-    sim_instance.execute_sequence(plan_sequence)
+    sim_instance.execute_command(plan_sequence)
 
 
 if __name__ == "__main__":

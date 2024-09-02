@@ -3043,8 +3043,7 @@ def get_collision_fn(
     moving_bodies = [CollisionPair(body, moving_links)] + list(
         map(parse_body, attached_bodies)
     )
-    # moving_bodies = list(flatten(flatten_links(*pair) for pair in moving_bodies)) # Introduces overhead
-    # moving_bodies = [body] + [attachment.child for attachment in attachments]
+
     get_obstacle_aabb = cached_fn(
         get_buffered_aabb, cache=cache, max_distance=max_distance / 2.0, **kwargs
     )
@@ -3058,7 +3057,11 @@ def get_collision_fn(
         set_joint_positions(body, joints, q, **kwargs)
 
         for attachment in attachments:
-            attachment.assign(**kwargs)
+            world_T_child = multiply(
+                get_link_pose(body, attachment.parent, **kwargs),
+                attachment.parent_T_child,
+            )
+            set_pose(attachment.child, world_T_child, **kwargs)
 
         if extra_collisions is not None and extra_collisions(**kwargs):
             return True
@@ -3083,6 +3086,7 @@ def get_collision_fn(
             ) and pairwise_collision(body1, body2, **kwargs):
                 print("Body on body collision")
                 print(body1, body2)
+                wait_if_gui(**kwargs)
                 return True
         return False
 

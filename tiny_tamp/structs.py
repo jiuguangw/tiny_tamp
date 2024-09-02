@@ -1,13 +1,15 @@
+from __future__ import annotations
 
-import pb_utils as pbu
-import numpy as np
-import pybullet_utils.bullet_client as bc
 import itertools
-import pybullet as p
-from typing import Dict, List
-from dataclasses import dataclass
 from abc import ABC
-from dataclasses import field
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List
+
+import numpy as np
+import pybullet as p
+import pybullet_utils.bullet_client as bc
+
+import tiny_tamp.pb_utils as pbu
 
 ARM_GROUP = "main_arm"
 GRIPPER_GROUP = "main_gripper"
@@ -42,24 +44,35 @@ TABLE_POSE = pbu.Pose((0.45, 0, -TABLE_AABB.upper[2]))
 DEFAULT_TS = 5e-3
 PREGRASP_DISTANCE = 0.05
 
+
 @dataclass
 class ObjectState:
-    mesh: str # Path to .obj
-    pose: pbu.Pose # Current pose of the object
-    category: str = "" # Optional class label or object name
+    # Function that creates a new object given a pybullet client
+    create_object: Callable[[int], int]
+
+    pose: pbu.Pose  # Current pose of the object
+    category: str = ""  # Optional class label or object name
+
 
 @dataclass
 class WorldBelief:
-    object_states: List[ObjectState] # Mapping from id in pybullet client to object state
-    robot_state: List[float] # Current robot movable joint positions
+    object_states: List[
+        ObjectState
+    ]  # Mapping from id in pybullet client to object state
+    robot_state: List[float]  # Current robot movable joint positions
+
 
 @dataclass
 class SimulatorInstance:
-    client: int # The pybullet phyiscs client
-    robot: int # The robot id in the pybullet client
-    table: int # The table id in the pybullet client
-    movable_objects: Dict[int, ObjectState] # Mapping from id in pybullet client to object state
-    components: Dict[str, int] = field(default_factory=dict) # Mapping from group name to component id
+    client: int  # The pybullet phyiscs client
+    robot: int  # The robot id in the pybullet client
+    table: int  # The table id in the pybullet client
+    movable_objects: Dict[
+        int, ObjectState
+    ]  # Mapping from id in pybullet client to object state
+    components: Dict[str, int] = field(
+        default_factory=dict
+    )  # Mapping from group name to component id
 
     @staticmethod
     def from_belief(belief: WorldBelief, gui=False):
@@ -81,13 +94,12 @@ class SimulatorInstance:
 
         # Add the objects to the scene
         movable_objects = {}
-        for obj_id, obj_state in belief.object_states.items():
-            obj = pbu.load_pybullet(obj_state.mesh, client=client)
+        for obj_state in belief.object_states:
+            obj = obj_state.create_object(client)
             pbu.set_pose(obj, obj_state.pose, client=client)
             movable_objects[obj] = obj_state
-            
+
         return SimulatorInstance(client, robot_body, table, movable_objects)
-    
 
     def get_group_subtree(self, group, **kwargs):
         return pbu.get_link_subtree(
@@ -107,19 +119,17 @@ class SimulatorInstance:
                 pbu.set_all_color(component, pbu.TRANSPARENT)
             self.components[group] = component
         return self.components[group]
-    
+
     @property
     def tool_link(self):
         pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
-    
+
     def get_group_joints(self, group, **kwargs):
-        return pbu.joints_from_names(
-            self.robot, PANDA_GROUPS[group], **kwargs
-        )
+        return pbu.joints_from_names(self.robot, PANDA_GROUPS[group], **kwargs)
+
 
 class SimulatorState:
     def __init__(self, instance, attachments={}):
-        super(SimulatorState, self).__init__(attachments)
         self.attachments = attachments
         self.instance = instance
 
@@ -146,7 +156,8 @@ class Conf(object):
 
     def __repr__(self):
         return "q{}".format(id(self) % 1000)
-    
+
+
 class GroupConf(Conf):
     def __init__(self, body, group, *args, **kwargs):
         joints = body.get_group_joints(group, **kwargs)
@@ -155,7 +166,8 @@ class GroupConf(Conf):
 
     def __repr__(self):
         return "{}q{}".format(self.group[0], id(self) % 1000)
-    
+
+
 class Command(ABC):
 
     def iterate(self, state, **kwargs):
@@ -167,11 +179,11 @@ class Command(ABC):
     def execute(self, controller, *args, **kwargs):
         return True
 
-    
+
 class Trajectory(Command):
     def __init__(
         self,
-        sim:SimulatorInstance,
+        sim: SimulatorInstance,
         joints,
         path,
         velocity_scale=1.0,
@@ -213,9 +225,7 @@ class Trajectory(Command):
         )
 
     def adjust_path(self, **kwargs):
-        current_positions = pbu.get_joint_positions(
-            self.body, self.joints, **kwargs
-        )
+        current_positions = pbu.get_joint_positions(self.body, self.joints, **kwargs)
         return pbu.adjust_path(
             self.body, self.joints, [current_positions] + list(self.path), **kwargs
         )
@@ -235,7 +245,9 @@ class Trajectory(Command):
             pbu.set_joint_positions(self.body, self.joints, self.path[-1], **kwargs)
             return self.path[-1]
         else:
-            return pbu.step_curve(self.body, self.joints, self.compute_curve(**kwargs), **kwargs)
+            return pbu.step_curve(
+                self.body, self.joints, self.compute_curve(**kwargs), **kwargs
+            )
 
     def __repr__(self):
         return "t{}".format(id(self) % 1000)
@@ -252,7 +264,7 @@ class CaptureImage(Command):
 
 
 class GroupTrajectory(Trajectory):
-    def __init__(self, sim:SimulatorInstance, group:str, path, *args, **kwargs):
+    def __init__(self, sim: SimulatorInstance, group: str, path, *args, **kwargs):
         self.sim = sim
         joints = self.sim.get_group_joints(group, **kwargs)
         super(GroupTrajectory, self).__init__(self.sim, joints, path, *args, **kwargs)
@@ -274,9 +286,8 @@ class GroupTrajectory(Trajectory):
         return "{}t{}".format(self.group[0], id(self) % 1000)
 
 
-
 class ParentBody(object):
-    def __init__(self, sim:SimulatorInstance, link=pbu.BASE_LINK):
+    def __init__(self, sim: SimulatorInstance, link=pbu.BASE_LINK):
         self.body = sim.robot
         self.link = link
 
@@ -290,11 +301,10 @@ class ParentBody(object):
 
     def __repr__(self):
         return "Parent({})".format(self.body)
-    
 
 
 class Switch(Command):
-    def __init__(self, sim:SimulatorInstance, parent=None):
+    def __init__(self, sim: SimulatorInstance, parent=None):
         self.sim = sim
         self.parent = parent
 
@@ -341,10 +351,17 @@ class Switch(Command):
 
     def to_lisdf(self):
         return []
-    
+
 
 class Grasp(object):  # RelativePose
-    def __init__(self, sim:SimulatorInstance, grasp, pregrasp=None, closed_position=0.0, **kwargs):
+    def __init__(
+        self,
+        sim: SimulatorInstance,
+        grasp,
+        pregrasp=None,
+        closed_position=0.0,
+        **kwargs,
+    ):
         self.sim = sim
         self.grasp = grasp
         if pregrasp is None:
@@ -366,7 +383,6 @@ class Grasp(object):  # RelativePose
             pbu.Pose(pbu.Point(z=-object_distance)),
         )
 
-
     @property
     def value(self):
         return self.grasp
@@ -375,9 +391,7 @@ class Grasp(object):  # RelativePose
     def approach(self):
         return self.pregrasp
 
-    def create_relative_pose(
-        self, robot, link=pbu.BASE_LINK, **kwargs
-    ):
+    def create_relative_pose(self, robot, link=pbu.BASE_LINK, **kwargs):
         parent = ParentBody(body=robot, link=link, **kwargs)
         return RelativePose(
             self.body, parent=parent, relative_pose=self.grasp, **kwargs
@@ -389,7 +403,8 @@ class Grasp(object):  # RelativePose
 
     def __repr__(self):
         return "g{}".format(id(self) % 1000)
-    
+
+
 class Sequence(Command):
     def __init__(self, commands=[], name=None):
         self.context = None
@@ -434,12 +449,12 @@ class Sequence(Command):
 
     def __repr__(self):
         return "{}({})".format(self.name, len(self.commands))
-    
+
 
 class RelativePose(object):
     def __init__(
         self,
-        sim:SimulatorInstance,
+        sim: SimulatorInstance,
         body,
         parent=None,
         parent_state=None,
@@ -493,4 +508,3 @@ class RelativePose(object):
     def __repr__(self):
         name = "wp" if self.parent is None else "rp"
         return "{}{}".format(name, id(self) % 1000)
-   

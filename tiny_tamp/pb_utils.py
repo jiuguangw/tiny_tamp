@@ -15,7 +15,7 @@ from scipy.interpolate import CubicSpline, interp1d, make_interp_spline, make_ls
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation as R
 
-from bandu_stacking.motion_planning.motion_planners.rrt_connect import birrt
+from tiny_tamp.motion_planning.motion_planners.rrt_connect import birrt
 
 DEFAULT_CLIENT = None
 CLIENT = 0
@@ -65,7 +65,7 @@ class Mesh:
 
 RED = RGBA(1, 0, 0, 1)
 GREEN = RGBA(0, 1, 0, 1)
-BLUE = RGBA(0, 0, 1, 0.1)
+BLUE = RGBA(0, 0, 1, 1)
 BLACK = RGBA(0, 0, 0, 1)
 WHITE = RGBA(1, 1, 1, 1)
 BROWN = RGBA(0.396, 0.263, 0.129, 1)
@@ -946,7 +946,7 @@ def create_visual_shape(
         return NULL_ID
     point, quat = pose
     visual_args = {
-        "rgbaColor": color,
+        "rgbaColor": list(color),
         "visualFramePosition": point,
         "visualFrameOrientation": quat,
     }

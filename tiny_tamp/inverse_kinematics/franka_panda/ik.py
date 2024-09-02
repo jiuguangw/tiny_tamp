@@ -1,5 +1,5 @@
-from bandu_stacking.inverse_kinematics.ikfast import *  # For legacy purposes
-from bandu_stacking.inverse_kinematics.utils import IKFastInfo
+from tiny_tamp.inverse_kinematics.ikfast import *  # For legacy purposes
+from tiny_tamp.inverse_kinematics.utils import IKFastInfo
 
 # TODO: deprecate this file
 # FRANKA_URDF = "models/franka_description/robots/panda_arm.urdf"

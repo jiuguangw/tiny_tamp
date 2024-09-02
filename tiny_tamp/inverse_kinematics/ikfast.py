@@ -12,7 +12,7 @@ sys.path.append(PARENT_DIR)
 
 from itertools import chain, islice
 
-from bandu_stacking.pb_utils import (
+from tiny_tamp.pb_utils import (
     ConfSaver,
     elapsed_time,
     get_difference_fn,
@@ -45,7 +45,7 @@ SETUP_FILENAME = "setup.py"
 
 
 def get_module_name(ikfast_info):
-    return "bandu_stacking.inverse_kinematics.{}".format(ikfast_info.module_name)
+    return "tiny_tamp.inverse_kinematics.{}".format(ikfast_info.module_name)
 
 
 def import_ikfast(ikfast_info):
@@ -142,11 +142,6 @@ def check_solution(robot, joints, conf, tool_link, target_pose, tolerance=1e-6):
 def ikfast_forward_kinematics(
     robot, ikfast_info, tool_link, conf=None, use_ikfast=True, **kwargs
 ):
-    # TODO: cleanup ./pr2/ik.py
-    # from .ikLeft import leftFK
-    # from .ikRight import rightFK
-    # arm_fk = {'left': leftFK, 'right': rightFK}
-    # fk_fn = arm_fk[arm]
 
     ik_joints = get_ik_joints(robot, ikfast_info, tool_link, **kwargs)
     if conf is None:

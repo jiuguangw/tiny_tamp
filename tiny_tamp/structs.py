@@ -241,6 +241,15 @@ class SimulatorInstance:
             self.set_group_positions(GRIPPER_GROUP, joints)
             time.sleep(dt)
 
+            # Stop closing if collision
+            if any(
+                pbu.pairwise_collision(
+                    body1=self.robot, body2=other, client=self.client
+                )
+                for other in self.movable_objects
+            ):
+                break
+
         if self.real_robot:
             self.sender.close_gripper()
 

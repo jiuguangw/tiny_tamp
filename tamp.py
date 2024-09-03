@@ -89,7 +89,9 @@ def main():
 
     # Typically maintain two instances. One for visualizing the plan before execution and the other for planning
     assert not (args.vis_belief and args.vis_sim)  # You can only vis one thing in pb
-    sim_instance = SimulatorInstance.from_belief(belief, gui=args.vis_sim)
+    sim_instance = SimulatorInstance.from_belief(
+        belief, gui=args.vis_sim, real_robot=args.real_robot
+    )
     twin_sim_instance = SimulatorInstance.from_belief(belief, gui=args.vis_belief)
 
     pbu.wait_if_gui("Press enter to start planning", client=sim_instance.client)

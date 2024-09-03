@@ -97,7 +97,7 @@ class SimulatorInstance:
     gripper_group = "main_gripper"
 
     @staticmethod
-    def from_belief(belief: WorldBelief, gui=False):
+    def from_belief(belief: WorldBelief, gui=False, real_robot=False):
         client = bc.BulletClient(connection_mode=p.GUI if gui else p.DIRECT)
         client.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
         client.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
@@ -121,7 +121,18 @@ class SimulatorInstance:
             pbu.set_pose(obj, obj_state.pose, client=client)
             movable_objects.append(obj)
 
-        instance = SimulatorInstance(client, robot_body, table, movable_objects)
+        sender = None
+        if real_robot:
+            sender = PandaSender()
+
+        instance = SimulatorInstance(
+            client,
+            robot_body,
+            table,
+            movable_objects,
+            real_robot=real_robot,
+            sender=sender,
+        )
 
         # Move robot to joint positions
         if belief.gripper_open:

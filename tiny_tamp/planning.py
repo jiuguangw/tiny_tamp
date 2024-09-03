@@ -88,8 +88,6 @@ def plan_workspace_motion(
     This is useful if you want to move the gripper in a straight line
     path.
     """
-    print("Tool waypoints")
-    print(len(tool_waypoints))
     assert tool_waypoints
 
     tool_link = sim.tool_link

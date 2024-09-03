@@ -282,13 +282,14 @@ def plan_prehensile(
 
     pbu.set_pose(obj, pose, client=sim.client)
     gripper_path = compute_gripper_path(pose, grasp)
-    if workspace_collision(sim, gripper_path, grasp=None, obstacles=environment):
+    gripper_waypoints = gripper_path[:1] + gripper_path[-1:]
+    if workspace_collision(sim, gripper_waypoints, grasp=None, obstacles=environment):
         print("[plan_prehensile] gripper path in collision")
         return None
 
     arm_path = plan_workspace_motion(
         sim,
-        gripper_path,
+        gripper_waypoints,
         attachment=None,
         obstacles=environment,
         debug=debug,

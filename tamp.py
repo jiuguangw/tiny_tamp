@@ -72,10 +72,10 @@ def dummy_get_goal(belief: WorldBelief) -> GoalBelief:
 
     # The goal is to shift the red and blue blocks a little
     new_belief.object_states[0].pose = pbu.multiply(
-        pbu.Pose(pbu.Point(x=0.1)), new_belief.object_states[0].pose
+        pbu.Pose(pbu.Point(y=0.1)), new_belief.object_states[0].pose
     )
     new_belief.object_states[1].pose = pbu.multiply(
-        pbu.Pose(pbu.Point(x=-0.1)), new_belief.object_states[1].pose
+        pbu.Pose(pbu.Point(y=-0.1)), new_belief.object_states[1].pose
     )
     return new_belief
 

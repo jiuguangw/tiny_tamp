@@ -144,7 +144,7 @@ def main():
                 motion_planner,
                 placement_location=goal_object_state.pose,
             )
-            
+
             if subplan is None:
                 print("Planning failure")
                 print(json.dumps(statistics))
@@ -152,7 +152,7 @@ def main():
             else:
                 # Update object state to the goal state
                 belief.object_states[belief_object_index].pose = goal_object_state.pose
-                
+
                 # Update the robot state to the last state of the plan
                 belief.robot_state = subplan.commands[-1].commands[-1].path[-1]
 

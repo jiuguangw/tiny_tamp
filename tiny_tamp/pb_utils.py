@@ -15,8 +15,6 @@ from scipy.interpolate import CubicSpline, interp1d, make_interp_spline, make_ls
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation as R
 
-from tiny_tamp.motion_planning.motion_planners.rrt_connect import birrt
-
 DEFAULT_CLIENT = None
 CLIENT = 0
 BASE_LINK = -1
@@ -2339,6 +2337,61 @@ def wrap_positions(body, joints, positions, **kwargs):
     ]
 
 
+def cached_fn(fn, cache=True, **global_kargs):
+    def normal(*args, **local_kwargs):
+        kwargs = dict(global_kargs)
+        kwargs.update(local_kwargs)
+        return fn(*args, **kwargs)
+
+    if not cache:
+        return normal
+
+    try:
+        from functools import lru_cache as cache
+
+        @cache(maxsize=None, typed=False)
+        def wrapped(*args, **local_kwargs):
+            return normal(*args, **local_kwargs)
+
+        return wrapped
+    except ImportError:
+        pass
+
+    key_fn = id
+    cache = {}
+
+    def wrapped(*args, **local_kwargs):
+        args_key = tuple(map(key_fn, args))
+        local_kwargs_key = frozenset(
+            {key: key_fn(value) for key, value in local_kwargs.items()}.items()
+        )
+        key = (args_key, local_kwargs_key)
+        if key not in cache:
+            cache[key] = normal(*args, **local_kwargs)
+        return cache[key]
+
+    return wrapped
+
+
+def get_distance_fn(body, joints, weights=None, norm=2, **kwargs):
+    weights = get_default_weights(body, joints, weights)
+    difference_fn = get_difference_fn(body, joints, **kwargs)
+
+    def fn(q1, q2):
+        diff = np.array(difference_fn(q2, q1))
+        if norm == 2:
+            return np.sqrt(np.dot(weights, diff * diff))
+        return np.linalg.norm(np.multiply(weights, diff), ord=norm)
+
+    return fn
+
+
+def get_default_resolutions(body, joints, resolutions=None, **kwargs):
+    if resolutions is not None:
+        return resolutions
+    return np.array([get_default_resolution(body, joint, **kwargs) for joint in joints])
+
+
 def get_refine_fn(body, joints, num_steps=0, **kwargs):
     difference_fn = get_difference_fn(body, joints, **kwargs)
     num_steps = num_steps + 1
@@ -2351,12 +2404,6 @@ def get_refine_fn(body, joints, num_steps=0, **kwargs):
             yield q
 
     return fn
-
-
-def get_default_resolutions(body, joints, resolutions=None, **kwargs):
-    if resolutions is not None:
-        return resolutions
-    return np.array([get_default_resolution(body, joint, **kwargs) for joint in joints])
 
 
 def get_extend_fn(body, joints, resolutions=None, norm=2, **kwargs):
@@ -2383,7 +2430,6 @@ def interpolate_joint_waypoints(
     collision_fn=lambda *args, **kwargs: False,
     **kwargs,
 ):
-    # TODO: unify with refine_path
     extend_fn = get_extend_fn(body, joints, resolutions=resolutions, **kwargs)
     path = waypoints[:1]
     for waypoint in waypoints[1:]:
@@ -2857,22 +2903,6 @@ def inverse_kinematics(
     return kinematic_conf
 
 
-def get_extend_fn(body, joints, resolutions=None, norm=2, **kwargs):
-    # norm = 1, 2, INF
-    resolutions = get_default_resolutions(body, joints, resolutions, **kwargs)
-    difference_fn = get_difference_fn(body, joints, **kwargs)
-
-    def fn(q1, q2):
-        # steps = int(np.max(np.abs(np.divide(difference_fn(q2, q1), resolutions))))
-        steps = int(
-            np.linalg.norm(np.divide(difference_fn(q2, q1), resolutions), ord=norm)
-        )
-        refine_fn = get_refine_fn(body, joints, num_steps=steps, **kwargs)
-        return refine_fn(q1, q2)
-
-    return fn
-
-
 def recenter_oobb(oobb):
     aabb, pose = oobb
     extent = get_aabb_extent(aabb)
@@ -2978,223 +3008,10 @@ def get_self_link_pairs(
     return check_link_pairs
 
 
-def cached_fn(fn, cache=True, **global_kargs):
-    def normal(*args, **local_kwargs):
-        kwargs = dict(global_kargs)
-        kwargs.update(local_kwargs)
-        return fn(*args, **kwargs)
-
-    if not cache:
-        return normal
-
-    try:
-        from functools import lru_cache as cache
-
-        @cache(maxsize=None, typed=False)
-        def wrapped(*args, **local_kwargs):
-            return normal(*args, **local_kwargs)
-
-        return wrapped
-    except ImportError:
-        pass
-
-    key_fn = id
-    cache = {}
-
-    def wrapped(*args, **local_kwargs):
-        args_key = tuple(map(key_fn, args))
-        local_kwargs_key = frozenset(
-            {key: key_fn(value) for key, value in local_kwargs.items()}.items()
-        )
-        key = (args_key, local_kwargs_key)
-        if key not in cache:
-            cache[key] = normal(*args, **local_kwargs)
-        return cache[key]
-
-    return wrapped
-
-
-def get_collision_fn(
-    body,
-    joints,
-    obstacles=[],
-    attachments=[],
-    self_collisions=True,
-    disabled_collisions=set(),
-    custom_limits={},
-    use_aabb=False,
-    cache=False,
-    max_distance=MAX_DISTANCE,
-    extra_collisions=None,
-    **kwargs,
-):
-    # TODO: convert most of these to keyword arguments
-    check_link_pairs = (
-        get_self_link_pairs(body, joints, disabled_collisions, **kwargs)
-        if self_collisions
-        else []
-    )
-    moving_links = frozenset(
-        link
-        for link in get_moving_links(body, joints, **kwargs)
-        if can_collide(body, link, **kwargs)
-    )  # TODO: propagate elsewhere
-    attached_bodies = [attachment.child for attachment in attachments]
-    moving_bodies = [CollisionPair(body, moving_links)] + list(
-        map(parse_body, attached_bodies)
-    )
-
-    get_obstacle_aabb = cached_fn(
-        get_buffered_aabb, cache=cache, max_distance=max_distance / 2.0, **kwargs
-    )
-    limits_fn = get_limits_fn(body, joints, custom_limits=custom_limits, **kwargs)
-
-    def collision_fn(q, verbose=False):
-
-        if limits_fn(q):
-            return True
-
-        set_joint_positions(body, joints, q, **kwargs)
-
-        for attachment in attachments:
-            world_T_child = multiply(
-                get_link_pose(body, attachment.parent, **kwargs),
-                attachment.parent_T_child,
-            )
-            set_pose(attachment.child, world_T_child, **kwargs)
-
-        if extra_collisions is not None and extra_collisions(**kwargs):
-            return True
-
-        get_moving_aabb = cached_fn(
-            get_buffered_aabb, cache=True, max_distance=max_distance / 2.0, **kwargs
-        )
-
-        for link1, link2 in check_link_pairs:
-            if (
-                not use_aabb
-                or aabb_overlap(get_moving_aabb(body), get_moving_aabb(body))
-            ) and pairwise_link_collision(body, link1, body, link2, **kwargs):
-                print("Link on link collision")
-                print(body, link1, body, link2)
-                return True
-
-        for body1, body2 in itertools.product(moving_bodies, obstacles):
-            if (
-                not use_aabb
-                or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))
-            ) and pairwise_collision(body1, body2, **kwargs):
-                print("Body on body collision")
-                print(body1, body2)
-                wait_if_gui(**kwargs)
-                return True
-        return False
-
-    return collision_fn
-
-
 def get_default_weights(body, joints, weights=None):
     if weights is not None:
         return weights
     return 1 * np.ones(len(joints))
-
-
-def get_distance_fn(body, joints, weights=None, norm=2, **kwargs):
-    weights = get_default_weights(body, joints, weights)
-    difference_fn = get_difference_fn(body, joints, **kwargs)
-
-    def fn(q1, q2):
-        diff = np.array(difference_fn(q2, q1))
-        if norm == 2:
-            return np.sqrt(np.dot(weights, diff * diff))
-        return np.linalg.norm(np.multiply(weights, diff), ord=norm)
-
-    return fn
-
-
-def check_initial_end(
-    body,
-    joints,
-    start_conf,
-    end_conf,
-    collision_fn,
-    debug=False,
-    verbose=True,
-    **kwargs,
-):
-    # TODO: collision_fn might not accept kwargs
-    if collision_fn(start_conf, verbose=verbose):
-        print("Warning: initial configuration is in collision {}".format(start_conf))
-        if debug:
-            set_joint_positions(body, joints, start_conf, **kwargs)
-            wait_if_gui(**kwargs)
-        return False
-    if collision_fn(end_conf, verbose=verbose):
-        print("Warning: end configuration is in collision {}".format(end_conf))
-        if debug:
-            set_joint_positions(body, joints, end_conf, **kwargs)
-            wait_if_gui(**kwargs)
-        return False
-    return True
-
-
-def plan_joint_motion(
-    body,
-    joints,
-    end_conf,
-    obstacles=[],
-    attachments=[],
-    self_collisions=True,
-    disabled_collisions=set(),
-    weights=None,
-    resolutions=None,
-    max_distance=MAX_DISTANCE,
-    use_aabb=False,
-    cache=True,
-    custom_limits={},
-    disable_collisions=False,
-    extra_collisions=None,
-    debug=False,
-    **kwargs,
-):
-    assert len(joints) == len(end_conf)
-    if (weights is None) and (resolutions is not None):
-        weights = np.reciprocal(resolutions)
-    sample_fn = get_sample_fn(body, joints, custom_limits=custom_limits, **kwargs)
-    distance_fn = get_distance_fn(body, joints, weights=weights, **kwargs)
-    extend_fn = get_extend_fn(body, joints, resolutions=resolutions, **kwargs)
-    collision_fn = get_collision_fn(
-        body,
-        joints,
-        obstacles,
-        attachments,
-        self_collisions,
-        disabled_collisions,
-        custom_limits=custom_limits,
-        max_distance=max_distance,
-        use_aabb=use_aabb,
-        cache=cache,
-        disable_collisions=disable_collisions,
-        extra_collisions=extra_collisions,
-        debug=debug,
-        **kwargs,
-    )
-
-    start_conf = get_joint_positions(body, joints, **kwargs)
-    if not check_initial_end(
-        body, joints, start_conf, end_conf, collision_fn, debug=debug, **kwargs
-    ):
-        return None
-
-    return birrt(
-        start_conf,
-        end_conf,
-        distance_fn,
-        sample_fn,
-        extend_fn,
-        collision_fn,
-        **kwargs,
-    )
 
 
 def euler_from_quat(quat):
@@ -3275,11 +3092,7 @@ def multiple_sub_inverse_kinematics(
         sub_robot, get_ordered_ancestors(sub_robot, sub_target_link)
     )
     selected_joints = affected_joints
-    # sub_from_real = dict(safe_zip(sub_joints, selected_joints))
-
-    # sample_fn = get_sample_fn(sub_robot, sub_joints, custom_limits=custom_limits) # [-PI, PI]
     sample_fn = get_sample_fn(robot, selected_joints, custom_limits=custom_limits)
-    # lower_limits, upper_limits = get_custom_limits(robot, get_movable_joints(robot), custom_limits)
     solutions = []
     for attempt in range(max_attempts):
         if (len(solutions) >= max_solutions) or (elapsed_time(start_time) >= max_time):
@@ -3295,17 +3108,12 @@ def multiple_sub_inverse_kinematics(
             **kwargs,
         )
         if sub_kinematic_conf is not None:
-            # set_configuration(sub_robot, sub_kinematic_conf)
             sub_kinematic_conf = get_joint_positions(sub_robot, sub_joints, **kwargs)
             set_joint_positions(robot, selected_joints, sub_kinematic_conf, **kwargs)
-            kinematic_conf = get_configuration(
-                robot, **kwargs
-            )  # TODO: test on the resulting robot state (e.g. collisions)
-            # if not all_between(lower_limits, kinematic_conf, upper_limits):
-            solutions.append(kinematic_conf)  # kinematic_conf | sub_kinematic_conf
+            kinematic_conf = get_configuration(robot, **kwargs)
+            solutions.append(kinematic_conf)
     if solutions:
         set_configuration(robot, solutions[-1])
-    # TODO: test for redundant configurations
     remove_body(sub_robot)
     return solutions
 

@@ -136,9 +136,9 @@ class SimulatorInstance:
     def set_belief(self, belief: WorldBelief):
         assert len(belief.object_states) == len(self.movable_objects)
 
-        for obj_state in belief.object_states:
+        for obj_state, obj_id in zip(belief.object_states, self.movable_objects):
             pbu.set_pose(
-                obj_state.create_object(self.client), obj_state.pose, client=self.client
+                obj_id, obj_state.pose, client=self.client
             )
         self.set_group_positions(self.arm_group, belief.robot_state)
         if belief.gripper_open:

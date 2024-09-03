@@ -98,7 +98,7 @@ class ImageListener:
 
 
 # image_listener = ImageListener("front_left_cam")
-image_listener = ImageListener("wrist_cam")
+# image_listener = ImageListener("wrist_cam")
 
 arm_interface = ArmInterface()
 gripper_interface = GripperInterface()
@@ -116,14 +116,14 @@ def pose_to_ros(pose):
     return pose_message
 
 
-def capture_realsense(message):
-    intrinsics = np.reshape(image_listener.camera_info.K, (3, 3))
-    message = {
-        "rgb": image_listener.current_rgb,
-        "depth": image_listener.current_depth,
-        "intrinsics": intrinsics,
-    }
-    socket.send(zlib.compress(pickle.dumps(message)))
+# def capture_realsense(message):
+#     intrinsics = np.reshape(image_listener.camera_info.K, (3, 3))
+#     message = {
+#         "rgb": image_listener.current_rgb,
+#         "depth": image_listener.current_depth,
+#         "intrinsics": intrinsics,
+#     }
+#     socket.send(zlib.compress(pickle.dumps(message)))
 
 
 def command_arm(message):

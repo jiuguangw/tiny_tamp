@@ -4,9 +4,13 @@ import copy
 import itertools
 import math
 import random
+from dataclasses import dataclass
 from typing import Callable, List
 
 import numpy as np
+import trimesh
+from trimesh.points import plane_transform
+from trimesh.ray.ray_triangle import RayMeshIntersector
 
 import tiny_tamp.pb_utils as pbu
 from tiny_tamp.inverse_kinematics.franka_panda.ik import PANDA_INFO
@@ -184,6 +188,25 @@ def plan_workspace_motion(
 
                 return arm_path
     return None
+
+
+def fixed_grasp_sampler(
+    sim: SimulatorInstance, belief: WorldBelief
+) -> Callable[[int], Grasp]:
+
+    def gen_fn(obj: int) -> Grasp:
+        closed_conf, _ = sim.get_group_limits(sim.gripper_group)
+        closed_position = closed_conf[0] * (1 + 5e-2)
+        grasp_pose = pbu.multiply(
+            pbu.Pose(euler=pbu.Euler(pitch=-np.pi / 2.0)),
+            pbu.Pose(pbu.Point(z=-0.01)),
+        )
+        return Grasp(
+            attachment=Attachment(sim.robot, sim.tool_link, obj, grasp_pose),
+            closed_position=closed_position,
+        )
+
+    return gen_fn
 
 
 def compute_gripper_path(pose: pbu.Pose, grasp: Grasp, pos_step_size=0.02):
@@ -631,3 +654,302 @@ def plan_joint_motion(
         client=sim.client,
         **kwargs,
     )
+
+
+#### Antipodal Grasps ####
+@dataclass
+class ScoredGrasp:
+    pose: pbu.Pose
+    contact1: pbu.Point
+    contact2: pbu.Point
+    score: float
+
+
+@dataclass
+class Plane:
+    normal: np.ndarray
+    origin: np.ndarray
+
+
+def mesh_from_obj(sim: SimulatorInstance, obj: int) -> pbu.Mesh:
+
+    # PyBullet creates multiple collision elements (with unknown_file) when nonconvex
+    [data] = pbu.get_visual_data(obj, -1, client=sim.client)
+    filename = pbu.get_data_filename(data)
+    scale = pbu.get_data_scale(data)
+    if filename == pbu.UNKNOWN_FILE:
+        raise RuntimeError(filename)
+    elif filename == "":
+        # Unknown mesh, approximate with bounding box
+        aabb = pbu.get_aabb(obj, client=sim.client)
+        aabb_center = pbu.get_aabb_center(aabb)
+        centered_aabb = pbu.AABB(
+            lower=aabb.lower - aabb_center, upper=aabb.upper - aabb_center
+        )
+        mesh = pbu.mesh_from_points(pbu.get_aabb_vertices(centered_aabb))
+    else:
+        mesh = pbu.read_obj(filename, decompose=False)
+
+    vertices = [scale * np.array(vertex) for vertex in mesh.vertices]
+    vertices = pbu.tform_points(pbu.get_data_pose(data), vertices)
+    return pbu.Mesh(vertices, mesh.faces)
+
+
+def extract_normal(mesh, index):
+    return np.array(mesh.face_normals[index, :])
+
+
+def point_plane_distance(plane, point, signed=True):
+    plane_normal, plane_point = plane
+    signed_distance = np.dot(plane_normal, np.array(point) - np.array(plane_point))
+    if signed:
+        return signed_distance
+    return abs(signed_distance)
+
+
+def project_plane(plane, point):
+    normal, _ = plane
+    return np.array(point) - point_plane_distance(plane, point) * normal
+
+
+def get_plane_quat(normal):
+    plane = Plane(normal, np.zeros(3))
+    normal, origin = plane
+    tform = np.linalg.inv(plane_transform(origin, -normal))  # origin=None
+    quat1 = pbu.quat_from_matrix(tform)
+    pose1 = pbu.Pose(origin, euler=pbu.euler_from_quat(quat1))
+
+    projection_world = project_plane(plane, np.array([0, 0, 1]))
+    projection = pbu.tform_point(pbu.invert(pose1), projection_world)
+    yaw = pbu.get_yaw(projection[:2])
+    quat2 = pbu.multiply_quats(quat1, pbu.quat_from_euler(pbu.Euler(yaw=yaw)))
+
+    return quat2
+
+
+def sample_grasp(
+    obj,
+    point1,
+    point2,
+    pitches=[-np.pi, np.pi],
+    discrete_pitch=False,
+    finger_length=0,
+    **kwargs,
+):
+    grasp_point = pbu.convex_combination(point1, point2)
+    direction2 = point2 - point1
+    quat = get_plane_quat(direction2)  # Biases toward the smallest rotation to align
+    pitches = sorted(pitches)
+
+    while True:
+        if discrete_pitch:
+            pitch = random.choice(pitches)
+        else:
+            pitch_range = [pitches[0], pitches[-1]]
+            pitch = random.uniform(*pitch_range)
+        roll = random.choice([0, np.pi])
+
+        grasp_quat = pbu.multiply_quats(
+            quat,
+            pbu.quat_from_euler(pbu.Euler(roll=np.pi / 2)),
+            pbu.quat_from_euler(pbu.Euler(pitch=np.pi + pitch)),
+            pbu.quat_from_euler(pbu.Euler(roll=roll)),
+        )
+        grasp_pose = pbu.Pose(grasp_point, pbu.euler_from_quat(grasp_quat))
+        grasp_pose = pbu.multiply(grasp_pose, pbu.Pose(pbu.Point(x=finger_length)))
+
+        yield pbu.invert(grasp_pose), []
+
+
+def tuplify_score(s):
+    if isinstance(s, tuple):
+        return s
+    return (s,)
+
+
+def negate_score(s):
+    if isinstance(s, tuple):
+        return s.__class__(map(negate_score, s))
+    return -s
+
+
+def combine_scores(score, *scores):
+    combined_score = tuplify_score(score)
+    for other_score in scores:
+        combined_score = combined_score + tuplify_score(other_score)
+    return combined_score
+
+
+def score_torque(mesh, tool_from_grasp, **kwargs):
+    center_mass = mesh.center_mass
+    x, _, z = pbu.tform_point(tool_from_grasp, center_mass)  # Distance in xz plane
+    return -pbu.get_length([x, z])
+
+
+def sample_sphere_surface(d, uniform=True):
+    while True:
+        v = np.random.randn(d)
+        r = np.sqrt(v.dot(v))
+        if not uniform or (r <= 1.0):
+            return v / r
+
+
+def score_overlap(
+    intersector,
+    point1,
+    point2,
+    num_samples=15,
+    radius=1.5e-2,
+    draw=False,
+    verbose=False,
+    **kwargs,
+):
+    handles = []
+    if draw:
+        handles.append(pbu.add_line(point1, point2, color=pbu.RED))
+    midpoint = np.average([point1, point2], axis=0)
+    direction1 = point1 - point2
+    direction2 = point2 - point1
+
+    origins = []
+    for _ in range(num_samples):
+        other_direction = radius * sample_sphere_surface(d=3)
+        orthogonal_direction = np.cross(
+            pbu.get_unit_vector(direction1), other_direction
+        )
+        orthogonal_direction = radius * pbu.get_unit_vector(orthogonal_direction)
+        origin = midpoint + orthogonal_direction
+        origins.append(origin)
+        if draw:
+            handles.append(pbu.add_line(midpoint, origin, color=pbu.RED))
+    rays = list(range(len(origins)))
+
+    direction_differences = []
+    for direction in [direction1, direction2]:
+        point = midpoint + direction / 2.0
+        contact_distance = pbu.get_distance(midpoint, point)
+        results = intersector.intersects_id(
+            origins,
+            len(origins) * [direction],
+            return_locations=True,
+            multiple_hits=True,
+        )
+        intersections_from_ray = {}
+        for face, ray, location in zip(*results):
+            intersections_from_ray.setdefault(ray, []).append((face, location))
+
+        differences = []
+        for ray in rays:
+            if ray in intersections_from_ray:
+                face, location = min(
+                    intersections_from_ray[ray],
+                    key=lambda pair: pbu.get_distance(point, pair[-1]),
+                )
+                distance = pbu.get_distance(origins[ray], location)
+                difference = abs(contact_distance - distance)
+            else:
+                difference = np.nan  # INF
+            differences.append(difference)
+        direction_differences.append(differences)
+
+    differences1, differences2 = direction_differences
+    combined = differences1 + differences2
+    percent = np.count_nonzero(~np.isnan(combined)) / (len(combined))
+    np.nanmean(combined)
+
+    score = percent
+
+    if verbose:
+        print(
+            "Score: {} | Percent1: {} | Average1: {:.3f} | Percent2: {} | Average2: {:.3f}".format(
+                score,
+                np.mean(~np.isnan(differences1)),
+                np.nanmean(differences1),
+                np.mean(~np.isnan(differences2)),
+                np.nanmean(differences2),
+            )
+        )
+    if draw:
+        pbu.wait_if_gui()
+        pbu.remove_handles(handles, **kwargs)
+    return score
+
+
+def antipodal_grasp_sampler(
+    sim: SimulatorInstance,
+    belief: WorldBelief,
+    max_width=np.inf,
+    target_tolerance=np.pi / 4,
+    antipodal_tolerance=0,
+    z_threshold=-np.inf,
+    max_attempts=np.inf,
+    score_type="combined",
+) -> Callable[[int], Grasp]:
+
+    def gen_fn(obj: int) -> Grasp:
+
+        target_vector = pbu.get_unit_vector(np.array([0, 0, 1]))
+
+        pb_mesh = mesh_from_obj(sim, obj, client=sim.client)
+        # handles = draw_mesh(Mesh(vertices, faces))
+
+        mesh = trimesh.Trimesh(pb_mesh.vertices, pb_mesh.faces)
+        mesh.fix_normals()
+
+        aabb = pbu.AABB(*mesh.bounds)
+        surface_z = aabb.lower[2]
+        min_z = surface_z + z_threshold
+        intersector = RayMeshIntersector(mesh)
+
+        attempts = last_attempts = 0
+
+        while attempts < max_attempts:
+            attempts += 1
+            last_attempts += 1
+
+            [point1, point2], [index1, index2] = trimesh.sample.sample_surface(
+                mesh=mesh,
+                count=2,
+                face_weight=None,  # seed=random.randint(1, 1e8)
+            )
+
+            if any(point[2] < min_z for point in [point1, point2]):
+                continue
+            distance = pbu.get_distance(point1, point2)
+            if (distance > max_width) or (distance < 1e-3):
+                continue
+            direction2 = point2 - point1
+            if (
+                abs(pbu.angle_between(target_vector, direction2) - np.pi / 2)
+                > target_tolerance
+            ):
+                continue
+
+            normal1 = extract_normal(mesh, index1)
+            if normal1.dot(-direction2) < 0:
+                normal1 *= -1
+            error1 = pbu.angle_between(normal1, -direction2)
+
+            normal2 = extract_normal(mesh, index2)
+            if normal2.dot(direction2) < 0:
+                normal2 *= -1
+            error2 = pbu.angle_between(normal2, direction2)
+
+            if (error1 > antipodal_tolerance) or (error2 > antipodal_tolerance):
+                continue
+
+            # TODO: average the normals to select a new pair of contact points
+
+            tool_from_grasp, _ = next(sample_grasp(obj, point1, point2))
+
+            assert score_type == "combined"
+
+            score = combine_scores(
+                score_overlap(intersector, point1, point2),
+                score_torque(mesh, tool_from_grasp),
+            )
+            yield ScoredGrasp(tool_from_grasp, point1, point2, score)
+
+            last_attempts = 0
+
+    return gen_fn

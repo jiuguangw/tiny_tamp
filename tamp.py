@@ -4,19 +4,18 @@ import argparse
 import copy
 import json
 import sys
-from typing import Callable
-
-import numpy as np
 
 import tiny_tamp.pb_utils as pbu
-from tiny_tamp.planning import get_pick_place_plan, get_plan_motion_fn
+from tiny_tamp.planning import (
+    antipodal_grasp_sampler,
+    fixed_grasp_sampler,
+    get_pick_place_plan,
+    get_plan_motion_fn,
+)
 from tiny_tamp.structs import (
     DEFAULT_JOINT_POSITIONS,
-    GRIPPER_GROUP,
     TABLE_POSE,
-    Attachment,
     GoalBelief,
-    Grasp,
     ObjectState,
     Sequence,
     SimulatorInstance,
@@ -81,25 +80,6 @@ def dummy_get_goal(belief: WorldBelief) -> GoalBelief:
     return new_belief
 
 
-def get_grasp_gen_fn(
-    sim: SimulatorInstance, belief: WorldBelief
-) -> Callable[[int], Grasp]:
-
-    def gen_fn(obj: int) -> Grasp:
-        closed_conf, _ = sim.get_group_limits(GRIPPER_GROUP)
-        closed_position = closed_conf[0] * (1 + 5e-2)
-        grasp_pose = pbu.multiply(
-            pbu.Pose(euler=pbu.Euler(pitch=-np.pi / 2.0)),
-            pbu.Pose(pbu.Point(z=-0.01)),
-        )
-        return Grasp(
-            attachment=Attachment(sim.robot, sim.tool_link, obj, grasp_pose),
-            closed_position=closed_position,
-        )
-
-    return gen_fn
-
-
 def main():
     args = create_args()
 
@@ -118,7 +98,8 @@ def main():
         twin_sim_instance,
     )
 
-    grasp_sampler = get_grasp_gen_fn(twin_sim_instance, belief)
+    # grasp_sampler = antipodal_grasp_sampler(twin_sim_instance, belief)
+    grasp_sampler = fixed_grasp_sampler(twin_sim_instance, belief)
 
     plan_components = []
     for goal_object_state in goal_belief.object_states:

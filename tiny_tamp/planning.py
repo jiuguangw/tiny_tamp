@@ -11,7 +11,6 @@ import numpy as np
 import trimesh
 from trimesh.points import plane_transform
 from trimesh.ray.ray_triangle import RayMeshIntersector
-from trimesh.points import plane_transform
 
 import tiny_tamp.pb_utils as pbu
 from tiny_tamp.motion_planning.motion_planners.rrt_connect import birrt
@@ -732,14 +731,14 @@ def extract_normal(mesh, index):
     return np.array(mesh.face_normals[index, :])
 
 
-def point_plane_distance(plane:Plane, point, signed=True):
+def point_plane_distance(plane: Plane, point, signed=True):
     signed_distance = np.dot(plane.normal, np.array(point) - np.array(plane.origin))
     if signed:
         return signed_distance
     return abs(signed_distance)
 
 
-def project_plane(plane:Plane, point):
+def project_plane(plane: Plane, point):
     return np.array(point) - point_plane_distance(plane, point) * plane.normal
 
 
@@ -910,7 +909,7 @@ def antipodal_grasp_sampler(
     belief: WorldBelief,
     max_width=np.inf,
     target_tolerance=np.pi / 4,
-    antipodal_tolerance=np.pi/16.0,
+    antipodal_tolerance=np.pi / 16.0,
     z_threshold=-np.inf,
     max_attempts=np.inf,
 ) -> Callable[[int], Grasp]:
@@ -973,16 +972,17 @@ def antipodal_grasp_sampler(
 
             world_T_obj = pbu.get_pose(obj, client=sim.client)
             world_T_parent = pbu.multiply(world_T_obj, pbu.invert(tool_from_grasp))
-            
+
             if workspace_collision(sim, [world_T_parent], grasp=None, obstacles=[obj]):
                 continue
 
-            
             pbu.wait_if_gui(client=sim.client)
             closed_conf, _ = sim.get_group_limits(sim.gripper_group)
             closed_position = closed_conf[0] * (1 + 5e-2)
-            return Grasp(attachment=Attachment(sim.robot, sim.tool_link, obj, tool_from_grasp), 
-                         closed_position=closed_position)
+            return Grasp(
+                attachment=Attachment(sim.robot, sim.tool_link, obj, tool_from_grasp),
+                closed_position=closed_position,
+            )
         return None
 
     return gen_fn

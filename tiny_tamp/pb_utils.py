@@ -442,7 +442,6 @@ def retime_trajectory(
 
 
 def approximate_spline(time_from_starts, path, k=3, approx=np.inf):
-
     x = time_from_starts
     if approx == np.inf:
         positions = make_interp_spline(
@@ -2663,7 +2662,6 @@ def unit_vector(data, axis=None, out=None):
 
 
 def quaternion_slerp(quat0, quat1, fraction, spin=0, shortestpath=True):
-
     q0 = unit_vector(quat0[:4])
     q1 = unit_vector(quat1[:4])
     if fraction == 0.0:

@@ -15,7 +15,6 @@ ts = enum("ALL", "SUCCESS", "PATH", "NONE")
 
 
 class MultiTree(Mapping, object):
-
     def __init__(self, start, distance_fn, sample_fn, extend_fn, collision_fn):
         self.nodes = {}
         self.distance_fn = distance_fn
@@ -71,7 +70,6 @@ class MultiTree(Mapping, object):
 
 
 class MultiRRT(MultiTree):
-
     def grow(
         self,
         goal_sample,
@@ -108,7 +106,6 @@ class MultiRRT(MultiTree):
 
 
 class MultiBiRRT(MultiTree):
-
     def grow(self, goal, iterations=50, store=ts.PATH, max_tree_size=500):
         if goal in self:
             return self[goal].retrace()

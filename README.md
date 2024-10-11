@@ -35,4 +35,4 @@ Running the planner will communicate with this server via zmq.
 - [ ] test the antipodal grasp sampler
 - [ ] ycb objects
 - [ ] test on real robot
-- [ ] replace fastik
+- [x] replace fastik

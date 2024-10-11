@@ -9,7 +9,6 @@ from heapq import heappop, heappush
 
 
 class Vertex(object):
-
     def __init__(self, value):
         self.value = value
         self.edges = []
@@ -19,7 +18,6 @@ class Vertex(object):
 
 
 class Edge(object):
-
     def __init__(self, v1, v2, value, cost):
         self.v1, self.v2 = v1, v2
         self.v1.edges.append(self)
@@ -41,7 +39,6 @@ SearchNode = namedtuple("SearchNode", ["cost", "edge"])
 
 
 class Graph(Mapping, object):
-
     def __init__(self):
         self.vertices = {}
         self.edges = []

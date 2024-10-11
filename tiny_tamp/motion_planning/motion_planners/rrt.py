@@ -5,7 +5,6 @@ from .utils import INF, RED, RRT_ITERATIONS, apply_alpha, argmin, elapsed_time, 
 
 
 class TreeNode(object):
-
     def __init__(self, config, parent=None):
         self.config = config
         self.parent = parent

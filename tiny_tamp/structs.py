@@ -30,6 +30,7 @@ DEFAULT_JOINT_POSITIONS = [
     0.7849295270972781,
 ]
 SELF_COLLISIONS = True
+PANDA_IGNORE_COLLISIONS = {(6, 9)}
 MAX_IK_TIME = 0.01
 MAX_IK_DISTANCE = np.inf
 MAX_TOOL_DISTANCE = np.inf
@@ -96,6 +97,8 @@ class SimulatorInstance:
     arm_group = "main_arm"
     gripper_group = "main_gripper"
 
+    group_joints: Dict[str, List[int]] = None
+
     @staticmethod
     def from_belief(belief: WorldBelief, gui=False, real_robot=False):
         client = bc.BulletClient(connection_mode=p.GUI if gui else p.DIRECT)
@@ -132,6 +135,14 @@ class SimulatorInstance:
             movable_objects,
             real_robot=real_robot,
             sender=sender,
+            group_joints={
+                "main_arm": pbu.joints_from_names(
+                    robot_body, PANDA_GROUPS["main_arm"], client=client
+                ),
+                "main_gripper": pbu.joints_from_names(
+                    robot_body, PANDA_GROUPS["main_gripper"], client=client
+                ),
+            },
         )
 
         # Move robot to joint positions
@@ -157,7 +168,7 @@ class SimulatorInstance:
 
     def get_group_parent(self, group):
         return pbu.get_link_parent(
-            self.robot, self.get_group_joints(group)[0], client=self.client
+            self.robot, self.group_joints[group][0], client=self.client
         )
 
     def get_group_subtree(self, group):
@@ -165,6 +176,11 @@ class SimulatorInstance:
             self.robot, self.get_group_parent(group), client=self.client
         )
 
+    def get_parent_from_tool(self):
+        tool_tip_link = pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
+        parent_link = self.get_group_parent(GRIPPER_GROUP)
+        return pbu.get_relative_pose(self.robot, tool_tip_link, parent_link, client=self.client)
+    
     def get_component_mapping(self, group):
         assert group in self.components
         component_joints = pbu.get_movable_joints(
@@ -179,7 +195,7 @@ class SimulatorInstance:
 
     def get_component_joints(self, group):
         mapping = self.get_component_mapping(group)
-        return list(map(mapping.get, self.get_group_joints(group)))
+        return list(map(mapping.get, self.group_joints[group]))
 
     def get_component(self, group, visual=True):
         if group not in self.components:
@@ -199,14 +215,14 @@ class SimulatorInstance:
     def tool_link(self):
         return pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
 
+    def get_group_limits(self, group):
+        return pbu.get_custom_limits(
+            self.robot, self.group_joints[group], client=self.client
+        )
+
     def get_group_joints(self, group):
         return pbu.joints_from_names(
             self.robot, PANDA_GROUPS[group], client=self.client
-        )
-
-    def get_group_limits(self, group, **kwargs):
-        return pbu.get_custom_limits(
-            self.robot, self.get_group_joints(group, **kwargs), client=self.client
         )
 
     def open_gripper(self, dt: float = 0.0):
@@ -217,7 +233,7 @@ class SimulatorInstance:
         # Open from current conf to open conf
         for joints in pbu.interpolate_joint_waypoints(
             self.robot,
-            self.get_group_joints(GRIPPER_GROUP),
+            self.group_joints[GRIPPER_GROUP],
             [current_conf, open_conf],
             client=self.client,
         ):
@@ -234,7 +250,7 @@ class SimulatorInstance:
         # Close from current conf to closed conf or until collision
         for joints in pbu.interpolate_joint_waypoints(
             self.robot,
-            self.get_group_joints(GRIPPER_GROUP),
+            self.group_joints[GRIPPER_GROUP],
             [current_conf, closed_conf],
             client=self.client,
         ):
@@ -253,26 +269,20 @@ class SimulatorInstance:
         if self.real_robot:
             self.sender.close_gripper()
 
-    def get_group_joints(self, group: str):
-        return pbu.joints_from_names(
-            self.robot, PANDA_GROUPS[group], client=self.client
-        )
-
     def get_group_positions(self, group: str) -> List[float]:
         return pbu.get_joint_positions(
-            self.robot, self.get_group_joints(group), client=self.client
+            self.robot, self.group_joints[group], client=self.client
         )
 
     def set_group_positions(self, group: str, positions: List[float]):
         pbu.set_joint_positions(
-            self.robot, self.get_group_joints(group), positions, client=self.client
+            self.robot, self.group_joints[group], positions, client=self.client
         )
 
         if self.real_robot:
             self.sender.command_arm(positions)
 
     def command_trajectory(self, trajectory: Trajectory, dt: float = 0.0):
-
         named_positions = []
         for positions in trajectory.path:
             self.set_group_positions(ARM_GROUP, positions)
@@ -296,6 +306,7 @@ class SimulatorInstance:
                     client=self.client,
                 )
             time.sleep(dt)
+            # pbu.wait_if_gui("Press enter to continue", client=self.client)
 
         if self.real_robot:
             self.sender.execute_position_path(named_positions)

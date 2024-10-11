@@ -23,7 +23,6 @@ from .utils import (
 
 
 class Vertex(object):
-
     def __init__(self, q):
         self.q = q
         self.edges = {}
@@ -45,7 +44,6 @@ class Vertex(object):
 
 
 class Edge(object):
-
     def __init__(self, v1, v2, path):
         self.v1, self.v2 = v1, v2
         self.v1.edges[v2], self.v2.edges[v1] = self, self
@@ -100,7 +98,6 @@ SearchNode = namedtuple("SearchNode", ["cost", "parent"])
 
 
 class Roadmap(Mapping, object):
-
     def __init__(self, samples=[]):
         self.vertices = {}
         self.edges = []
@@ -178,7 +175,6 @@ class Roadmap(Mapping, object):
 
 
 class PRM(Roadmap):
-
     def __init__(self, distance_fn, extend_fn, collision_fn, samples=[]):
         super(PRM, self).__init__()
         self.distance_fn = distance_fn
@@ -225,7 +221,6 @@ class PRM(Roadmap):
 
 
 class DistancePRM(PRM):
-
     def __init__(
         self, distance_fn, extend_fn, collision_fn, samples=[], connect_distance=0.5
     ):
@@ -247,7 +242,6 @@ class DistancePRM(PRM):
 
 
 class DegreePRM(PRM):
-
     def __init__(
         self,
         distance_fn,

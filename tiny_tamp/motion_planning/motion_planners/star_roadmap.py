@@ -5,7 +5,6 @@ except ImportError:
 
 
 class StarRoadmap(Mapping, object):
-
     def __init__(self, center, planner_fn):
         self.center = center  # TODO: plan instead from the closest point on the roadmap
         self.planner_fn = planner_fn

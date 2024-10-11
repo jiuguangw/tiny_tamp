@@ -32,7 +32,7 @@ Running the planner will communicate with this server via zmq.
 ## TODO
 
 - [ ] create statistics upon failure
-- [ ] test the antipodal grasp sampler
+- [x] test the antipodal grasp sampler
 - [ ] ycb objects
 - [ ] test on real robot
 - [x] replace fastik

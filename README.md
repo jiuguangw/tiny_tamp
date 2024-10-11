@@ -36,3 +36,4 @@ Running the planner will communicate with this server via zmq.
 - [ ] ycb objects
 - [ ] test on real robot
 - [x] replace fastik
+- [ ] replace motion planner with curobo (or something better)

@@ -10,7 +10,6 @@ PRINT_FREQUENCY = 100
 
 
 class OptimalNode(object):
-
     def __init__(self, config, parent=None, d=0, path=[], iteration=None):
         self.config = config
         self.parent = parent

@@ -30,6 +30,7 @@ DEFAULT_JOINT_POSITIONS = [
     0.7849295270972781,
 ]
 SELF_COLLISIONS = True
+PANDA_IGNORE_COLLISIONS = {(6, 9)}
 MAX_IK_TIME = 0.01
 MAX_IK_DISTANCE = np.inf
 MAX_TOOL_DISTANCE = np.inf
@@ -141,7 +142,7 @@ class SimulatorInstance:
                 "main_gripper": pbu.joints_from_names(
                     robot_body, PANDA_GROUPS["main_gripper"], client=client
                 ),
-            }
+            },
         )
 
         # Move robot to joint positions
@@ -209,9 +210,14 @@ class SimulatorInstance:
     def tool_link(self):
         return pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
 
-    def get_group_limits(self, group, **kwargs):
+    def get_group_limits(self, group):
         return pbu.get_custom_limits(
             self.robot, self.group_joints[group], client=self.client
+        )
+
+    def get_group_joints(self, group):
+        return pbu.joints_from_names(
+            self.robot, PANDA_GROUPS[group], client=self.client
         )
 
     def open_gripper(self, dt: float = 0.0):
@@ -272,7 +278,6 @@ class SimulatorInstance:
             self.sender.command_arm(positions)
 
     def command_trajectory(self, trajectory: Trajectory, dt: float = 0.0):
-
         named_positions = []
         for positions in trajectory.path:
             self.set_group_positions(ARM_GROUP, positions)
@@ -296,7 +301,7 @@ class SimulatorInstance:
                     client=self.client,
                 )
             time.sleep(dt)
-            pbu.wait_if_gui("Press enter to continue", client=self.client)
+            # pbu.wait_if_gui("Press enter to continue", client=self.client)
 
         if self.real_robot:
             self.sender.execute_position_path(named_positions)

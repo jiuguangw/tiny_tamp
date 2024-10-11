@@ -99,7 +99,6 @@ def wrap_collision_fn(collision_fn):
 
 
 def get_collision_fn(environment, obstacles):
-
     def collision_fn(q):
         # time.sleep(1e-3)
         if not contains(q, environment):

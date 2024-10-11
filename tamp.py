@@ -43,7 +43,6 @@ def create_args():
 
 
 def dummy_perception() -> WorldBelief:
-
     box_size = 0.05
 
     object1 = ObjectState(
@@ -105,7 +104,6 @@ def main():
 
     plan_components = []
     for goal_object_state in goal_belief.object_states:
-
         # Assuming all objects have unique categories
         belief_object_index, belief_object = [
             (obj_idx, obj)

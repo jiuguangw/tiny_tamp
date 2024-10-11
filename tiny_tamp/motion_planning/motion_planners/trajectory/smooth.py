@@ -58,7 +58,6 @@ def within_dynamical_limits(position_curve, max_v=None, max_a=None, **kwargs):
 def get_curve_collision_fn(
     collision_fn=lambda q: False, max_velocities=None, max_accelerations=None
 ):  # a_max
-
     def curve_collision_fn(curve, t0=None, t1=None):
         # TODO: stage the function to check all the easy things like joint limits first
         if curve is None:

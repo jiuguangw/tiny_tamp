@@ -13,18 +13,12 @@ from trimesh.points import plane_transform
 from trimesh.ray.ray_triangle import RayMeshIntersector
 
 import tiny_tamp.pb_utils as pbu
-from tiny_tamp.inverse_kinematics.franka_panda.ik import PANDA_INFO
-from tiny_tamp.inverse_kinematics.ikfast import (
-    closest_inverse_kinematics,
-    get_ik_joints,
-    ikfast_inverse_kinematics,
-)
 from tiny_tamp.motion_planning.motion_planners.rrt_connect import birrt
 from tiny_tamp.structs import (
+    ARM_GROUP,
     COLLISION_DISTANCE,
     COLLISION_EPSILON,
-    MAX_IK_DISTANCE,
-    MAX_IK_TIME,
+    PANDA_IGNORE_COLLISIONS,
     SELF_COLLISIONS,
     ActivateGrasp,
     Attachment,
@@ -36,102 +30,6 @@ from tiny_tamp.structs import (
     Trajectory,
     WorldBelief,
 )
-import pybullet as p
-
-
-def solve_ik(start_qs, target_poses, tool_name="panda_hand", ee_collisions=True, step_through=False, client=None):
-
-    random.seed(0)
-    np.random.seed(0)
-        
-    ik_solutions = []
-    randomize_seed = [False, False]
-    max_attempts = 15000
-
-    for i in range(max_attempts):
-        
-        if(len (ik_solutions) == len(robots)):
-            p.disconnect()
-            return ik_solutions
-
-        robot_idx = len(ik_solutions)
-
-        if(i % int(math.sqrt(max_attempts)) == 0):
-            ik_solutions = []
-            randomize_seed = [True, False]
-            continue
-
-        robot = robots[robot_idx]
-        target_pose = target_poses[robot_idx]
-
-        if(target_pose is None):
-            ik_solutions.append(start_qs[robot_idx])
-            continue
-
-        link = pbu.link_from_name(robot, tool_name, client=client)
-        joints = pbu.get_movable_joints(robot, client=client)
-        ranges = [pbu.get_joint_limits(robot, joint, client=client) for joint in joints]
-
-        # Start with the current joint positions and then randomize within limits after
-        if(not randomize_seed[robot_idx]):
-            initialization_sample = start_qs[robot_idx]
-            randomize_seed[robot_idx] = True
-        else:
-            initialization_sample = [random.uniform(r[0], r[1]) for r in ranges]
-            
-        pbu.set_joint_positions(robot, joints, initialization_sample, client=client)
-
-        conf = p.calculateInverseKinematics(
-            int(robot), link, target_pose[0], target_pose[1], 
-            residualThreshold=0.00001, maxNumIterations=5000
-        )
-        
-        lower, upper = list(zip(*ranges))
-        if(not pbu.all_between(lower, conf, upper)):
-            print("IK solution outside limits")
-            continue
-        
-        assert len(joints) == len(conf)
-        pbu.set_joint_positions(robot, joints, conf, client=client)
-
-        contact_points = []
-        for obstacle in obstacles:
-            contact_points += p.getClosestPoints(bodyA=obstacle, bodyB=robot, distance = pbu.MAX_DISTANCE)
-
-        for r_idx in range(len(ik_solutions)):
-            contact_points += p.getClosestPoints(bodyA=robots[r_idx], bodyB=robot, distance = pbu.MAX_DISTANCE)
-        
-
-        all_joints = pbu.get_joints(robot, client = client)
-        check_link_pairs = (
-            pbu.get_self_link_pairs(robot, all_joints, IGNORE_COLLISIONS, client = client)
-        )
-
-        self_collision = False
-        for link1, link2 in check_link_pairs:
-            if pbu.pairwise_link_collision(robot, link1, robot, link2, client = client):
-                print(link1, link2)
-                self_collision = True
-
-        if(self_collision):
-            print("Self collision")
-            continue
-
-        # Print contact points if there are any
-        if contact_points:
-            print("Collision!")
-            continue
-
-        pose = pbu.get_link_pose(robot, link, client=client)
-        trans_diff, rot_diff = pbu.get_pose_distance(target_pose, pose)
-
-        if(trans_diff < 0.001 and rot_diff < 0.01):
-            ik_solutions.append(list(conf))
-            continue
-        else:
-            print("IK Error: {}, {}".format(trans_diff, rot_diff))
-    
-    return None
 
 
 def get_plan_motion_fn(
@@ -171,6 +69,91 @@ def get_plan_motion_fn(
     return fn
 
 
+def solve_ik(sim: SimulatorInstance, link, target_pose, start_q=None, obstacles=[]):
+    randomize_seed = start_q is None
+    max_attempts = 100
+    arm_joints = sim.get_group_joints(ARM_GROUP)
+    ranges = [
+        pbu.get_joint_limits(sim.robot, joint, client=sim.client)
+        for joint in arm_joints
+    ]
+
+    for i in range(max_attempts):
+        # Start with the current joint positions and then randomize within limits after
+        if not randomize_seed:
+            initialization_sample = start_q
+            randomize_seed = True
+        else:
+            initialization_sample = [random.uniform(r[0], r[1]) for r in ranges]
+
+        pbu.set_joint_positions(
+            sim.robot, arm_joints, initialization_sample, client=sim.client
+        )
+
+        conf = sim.client.calculateInverseKinematics(
+            int(sim.robot),
+            link,
+            target_pose[0],
+            target_pose[1],
+            residualThreshold=0.00001,
+            maxNumIterations=5000,
+        )
+
+        # Need to extract the arm component of the returned joints
+        conf = [
+            q
+            for q, j in zip(conf, pbu.get_movable_joints(sim.robot, client=sim.client))
+            if j in arm_joints
+        ]
+
+        lower, upper = list(zip(*ranges))
+
+        assert len(arm_joints) == len(conf)
+        pbu.set_joint_positions(sim.robot, arm_joints, conf, client=sim.client)
+
+        if not pbu.all_between(lower, conf, upper):
+            print("IK solution outside limits")
+            continue
+
+        contact_points = []
+        for obstacle in obstacles:
+            contact_points += sim.client.getClosestPoints(
+                bodyA=obstacle, bodyB=sim.robot, distance=pbu.MAX_DISTANCE
+            )
+
+        all_joints = pbu.get_joints(sim.robot, client=sim.client)
+        check_link_pairs = pbu.get_self_link_pairs(
+            sim.robot, all_joints, PANDA_IGNORE_COLLISIONS, client=sim.client
+        )
+
+        self_collision = False
+        for link1, link2 in check_link_pairs:
+            if pbu.pairwise_link_collision(
+                sim.robot, link1, sim.robot, link2, client=sim.client
+            ):
+                print(link1, link2)
+                self_collision = True
+
+        if self_collision:
+            print("Self collision")
+            continue
+
+        # Print contact points if there are any
+        if contact_points:
+            print("Collision!")
+            continue
+
+        pose = pbu.get_link_pose(sim.robot, link, client=sim.client)
+        trans_diff, rot_diff = pbu.get_pose_distance(target_pose, pose)
+
+        if trans_diff < 0.001 and rot_diff < 0.01:
+            return list(conf)
+        else:
+            print("IK Error: {}, {}".format(trans_diff, rot_diff))
+
+    return None
+
+
 def plan_workspace_motion(
     sim: SimulatorInstance,
     tool_waypoints: List[pbu.Pose],
@@ -187,14 +170,9 @@ def plan_workspace_motion(
     assert tool_waypoints
 
     tool_link = sim.tool_link
-    ik_joints = get_ik_joints(sim.robot, PANDA_INFO, tool_link, client=sim.client)
-    fixed_joints = set(ik_joints) - set(sim.group_joints[sim.arm_group])
-    arm_joints = [j for j in ik_joints if j not in fixed_joints]
-    extract_arm_conf = lambda q: [
-        p for j, p in pbu.safe_zip(ik_joints, q) if j not in fixed_joints
-    ]
-
     parts = [sim.robot] + ([] if attachment is None else [attachment.child])
+    arm_joints = sim.get_group_joints(ARM_GROUP)
+
     collision_fn = get_collision_fn(
         sim,
         arm_joints,
@@ -204,90 +182,59 @@ def plan_workspace_motion(
     )
 
     for attempts in range(max_attempts):
-        for arm_conf in ikfast_inverse_kinematics(
-            sim.robot,
-            PANDA_INFO,
-            tool_link,
-            tool_waypoints[0],
-            fixed_joints=fixed_joints,
-            max_attempts=5,
-            max_time=np.inf,
-            max_distance=None,
-            use_halton=False,
-            client=sim.client,
-        ):
-            arm_conf = extract_arm_conf(arm_conf)
+        arm_conf = solve_ik(sim, tool_link, tool_waypoints[0])
 
-            if collision_fn(arm_conf):
+        if arm_conf is None or collision_fn(arm_conf):
+            continue
+
+        arm_waypoints = [arm_conf]
+        for tool_pose in tool_waypoints[1:]:
+            arm_conf = solve_ik(sim, tool_link, tool_pose, start_q=arm_waypoints[-1])
+            if arm_conf is None or collision_fn(arm_conf):
+                break
+
+            arm_waypoints.append(arm_conf)
+        else:
+            pbu.set_joint_positions(
+                sim.robot, arm_joints, arm_waypoints[-1], client=sim.client
+            )
+            if attachment is not None:
+                attachment.assign(sim)
+            if any(
+                pbu.pairwise_collisions(
+                    part,
+                    obstacles,
+                    max_distance=(COLLISION_DISTANCE + COLLISION_EPSILON),
+                    client=sim.client,
+                )
+                for part in parts
+            ):
+                if debug:
+                    pbu.wait_if_gui(client=sim.client)
+                continue
+            arm_path = pbu.interpolate_joint_waypoints(
+                sim.robot, arm_joints, arm_waypoints, client=sim.client
+            )
+
+            if any(collision_fn(q) for q in arm_path):
+                if debug:
+                    pbu.wait_if_gui(client=sim.client)
                 continue
 
-            arm_waypoints = [arm_conf]
-            for tool_pose in tool_waypoints[1:]:
-                arm_conf = next(
-                    closest_inverse_kinematics(
-                        sim.robot,
-                        PANDA_INFO,
-                        tool_link,
-                        tool_pose,
-                        fixed_joints=fixed_joints,
-                        max_candidates=np.inf,
-                        max_time=MAX_IK_TIME,
-                        max_distance=MAX_IK_DISTANCE,
-                        verbose=False,
-                        client=sim.client,
-                    ),
-                    None,
+            print(
+                "Found path with {} waypoints and {} configurations after {} attempts".format(
+                    len(arm_waypoints), len(arm_path), attempts + 1
                 )
-                if arm_conf is None:
-                    break
+            )
+            print(arm_path)
 
-                arm_conf = extract_arm_conf(arm_conf)
-                if collision_fn(arm_conf):
-                    if debug:
-                        pbu.wait_if_gui(client=sim.client)
-                    continue
-                arm_waypoints.append(arm_conf)
-            else:
-                pbu.set_joint_positions(
-                    sim.robot, arm_joints, arm_waypoints[-1], client=sim.client
-                )
-                if attachment is not None:
-                    attachment.assign(sim)
-                if any(
-                    pbu.pairwise_collisions(
-                        part,
-                        obstacles,
-                        max_distance=(COLLISION_DISTANCE + COLLISION_EPSILON),
-                        client=sim.client,
-                    )
-                    for part in parts
-                ):
-                    if debug:
-                        pbu.wait_if_gui(client=sim.client)
-                    continue
-                arm_path = pbu.interpolate_joint_waypoints(
-                    sim.robot, arm_joints, arm_waypoints, client=sim.client
-                )
-
-                if any(collision_fn(q) for q in arm_path):
-                    if debug:
-                        pbu.wait_if_gui(client=sim.client)
-                    continue
-
-                print(
-                    "Found path with {} waypoints and {} configurations after {} attempts".format(
-                        len(arm_waypoints), len(arm_path), attempts + 1
-                    )
-                )
-
-                return arm_path
+            return arm_path
     return None
 
 
 def fixed_grasp_sampler(
     sim: SimulatorInstance, belief: WorldBelief
 ) -> Callable[[int], Grasp]:
-
     def gen_fn(obj: int) -> Grasp:
         closed_conf, _ = sim.get_group_limits(sim.gripper_group)
         closed_position = closed_conf[0] * (1 + 5e-2)
@@ -360,7 +307,6 @@ def workspace_collision(
             )
             for part in parts
         ):
-
             print("[workspace_collision] gripper path in collision")
             return True
 
@@ -375,7 +321,6 @@ def plan_prehensile(
     environment: List[int] = [],
     debug: bool = False,
 ):
-
     pbu.set_pose(obj, pose, client=sim.client)
     gripper_path = compute_gripper_path(pose, grasp)
     gripper_waypoints = gripper_path[:1] + gripper_path[-1:]
@@ -415,9 +360,7 @@ def get_plan_pick_fn(sim: SimulatorInstance, environment: List[int] = [], debug=
             sim.group_joints[sim.arm_group],
             arm_path[::-1],
         )
-        arm_conf = Conf(
-            sim.robot, sim.group_joints[sim.arm_group], arm_traj.path[0]
-        )
+        arm_conf = Conf(sim.robot, sim.group_joints[sim.arm_group], arm_traj.path[0])
         switch = ActivateGrasp(sim.robot, sim.tool_link, obj)
         reverse_traj = copy.deepcopy(arm_traj).reverse()
         reverse_traj.attachments = [grasp.attachment]
@@ -435,7 +378,6 @@ def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
     environment = environment
 
     def fn(obj: int, pose: pbu.Pose, grasp: Grasp):
-
         obstacles = list(set(environment) - {obj})
         arm_path = plan_prehensile(
             sim, obj, pose, grasp, environment=obstacles, debug=debug
@@ -449,9 +391,7 @@ def get_plan_place_fn(sim: SimulatorInstance, environment=[], debug=False):
             arm_path[::-1],
             attachments=[grasp.attachment],
         )
-        arm_conf = Conf(
-            sim.robot, sim.group_joints[sim.arm_group], arm_traj.path[0]
-        )
+        arm_conf = Conf(sim.robot, sim.group_joints[sim.arm_group], arm_traj.path[0])
         switch = DeactivateGrasp(sim.robot, sim.tool_link, obj)
         reverse_traj = copy.deepcopy(arm_traj).reverse()
         reverse_traj.attachments = []
@@ -485,7 +425,6 @@ def get_pick_place_plan(
     max_place_attempts=5,
     placement_location=None,
 ) -> Sequence:
-
     # Only plan with the digital twin
     assert not sim.real_robot
 
@@ -607,7 +546,6 @@ def get_collision_fn(
     )
 
     def collision_fn(q, verbose=False):
-
         if limits_fn(q):
             return True
 
@@ -767,7 +705,6 @@ class Plane:
 
 
 def mesh_from_obj(sim: SimulatorInstance, obj: int) -> pbu.Mesh:
-
     # PyBullet creates multiple collision elements (with unknown_file) when nonconvex
     [data] = pbu.get_visual_data(obj, -1, client=sim.client)
     filename = pbu.get_data_filename(data)
@@ -980,9 +917,7 @@ def antipodal_grasp_sampler(
     max_attempts=np.inf,
     score_type="combined",
 ) -> Callable[[int], Grasp]:
-
     def gen_fn(obj: int) -> Grasp:
-
         target_vector = pbu.get_unit_vector(np.array([0, 0, 1]))
 
         pb_mesh = mesh_from_obj(sim, obj, client=sim.client)

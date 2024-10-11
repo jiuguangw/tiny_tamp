@@ -97,8 +97,9 @@ def main():
 
     motion_planner = get_plan_motion_fn(
         twin_sim_instance,
+        environment=twin_sim_instance.movable_objects+[twin_sim_instance.table]
     )
-
+    
     # grasp_sampler = antipodal_grasp_sampler(twin_sim_instance, belief)
     grasp_sampler = fixed_grasp_sampler(twin_sim_instance, belief)
 

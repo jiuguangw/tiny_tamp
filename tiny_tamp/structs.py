@@ -176,6 +176,11 @@ class SimulatorInstance:
             self.robot, self.get_group_parent(group), client=self.client
         )
 
+    def get_parent_from_tool(self):
+        tool_tip_link = pbu.link_from_name(self.robot, PANDA_TOOL_TIP, client=self.client)
+        parent_link = self.get_group_parent(GRIPPER_GROUP)
+        return pbu.get_relative_pose(self.robot, tool_tip_link, parent_link, client=self.client)
+    
     def get_component_mapping(self, group):
         assert group in self.components
         component_joints = pbu.get_movable_joints(

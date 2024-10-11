@@ -11,6 +11,7 @@ import numpy as np
 import trimesh
 from trimesh.points import plane_transform
 from trimesh.ray.ray_triangle import RayMeshIntersector
+from trimesh.points import plane_transform
 
 import tiny_tamp.pb_utils as pbu
 from tiny_tamp.motion_planning.motion_planners.rrt_connect import birrt
@@ -731,25 +732,22 @@ def extract_normal(mesh, index):
     return np.array(mesh.face_normals[index, :])
 
 
-def point_plane_distance(plane, point, signed=True):
-    plane_normal, plane_point = plane
-    signed_distance = np.dot(plane_normal, np.array(point) - np.array(plane_point))
+def point_plane_distance(plane:Plane, point, signed=True):
+    signed_distance = np.dot(plane.normal, np.array(point) - np.array(plane.origin))
     if signed:
         return signed_distance
     return abs(signed_distance)
 
 
-def project_plane(plane, point):
-    normal, _ = plane
-    return np.array(point) - point_plane_distance(plane, point) * normal
+def project_plane(plane:Plane, point):
+    return np.array(point) - point_plane_distance(plane, point) * plane.normal
 
 
 def get_plane_quat(normal):
     plane = Plane(normal, np.zeros(3))
-    normal, origin = plane
-    tform = np.linalg.inv(plane_transform(origin, -normal))  # origin=None
+    tform = np.linalg.inv(plane_transform(plane.origin, -normal))  # origin=None
     quat1 = pbu.quat_from_matrix(tform)
-    pose1 = pbu.Pose(origin, euler=pbu.euler_from_quat(quat1))
+    pose1 = pbu.Pose(plane.origin, euler=pbu.euler_from_quat(quat1))
 
     projection_world = project_plane(plane, np.array([0, 0, 1]))
     projection = pbu.tform_point(pbu.invert(pose1), projection_world)
@@ -912,15 +910,14 @@ def antipodal_grasp_sampler(
     belief: WorldBelief,
     max_width=np.inf,
     target_tolerance=np.pi / 4,
-    antipodal_tolerance=0,
+    antipodal_tolerance=np.pi/16.0,
     z_threshold=-np.inf,
     max_attempts=np.inf,
-    score_type="combined",
 ) -> Callable[[int], Grasp]:
     def gen_fn(obj: int) -> Grasp:
         target_vector = pbu.get_unit_vector(np.array([0, 0, 1]))
 
-        pb_mesh = mesh_from_obj(sim, obj, client=sim.client)
+        pb_mesh = mesh_from_obj(sim, obj)
         # handles = draw_mesh(Mesh(vertices, faces))
 
         mesh = trimesh.Trimesh(pb_mesh.vertices, pb_mesh.faces)
@@ -968,18 +965,24 @@ def antipodal_grasp_sampler(
             if (error1 > antipodal_tolerance) or (error2 > antipodal_tolerance):
                 continue
 
-            # TODO: average the normals to select a new pair of contact points
-
             tool_from_grasp, _ = next(sample_grasp(obj, point1, point2))
+            # score = combine_scores(
+            #     score_overlap(intersector, point1, point2),
+            #     score_torque(mesh, tool_from_grasp),
+            # )
 
-            assert score_type == "combined"
+            world_T_obj = pbu.get_pose(obj, client=sim.client)
+            world_T_parent = pbu.multiply(world_T_obj, pbu.invert(tool_from_grasp))
+            
+            if workspace_collision(sim, [world_T_parent], grasp=None, obstacles=[obj]):
+                continue
 
-            score = combine_scores(
-                score_overlap(intersector, point1, point2),
-                score_torque(mesh, tool_from_grasp),
-            )
-            yield ScoredGrasp(tool_from_grasp, point1, point2, score)
-
-            last_attempts = 0
+            
+            pbu.wait_if_gui(client=sim.client)
+            closed_conf, _ = sim.get_group_limits(sim.gripper_group)
+            closed_position = closed_conf[0] * (1 + 5e-2)
+            return Grasp(attachment=Attachment(sim.robot, sim.tool_link, obj, tool_from_grasp), 
+                         closed_position=closed_position)
+        return None
 
     return gen_fn
